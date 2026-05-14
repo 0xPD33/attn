@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-14
+
+### Added
+- `attn init --merge` layers an existing user config over the bundled defaults so newly shipped apps, domains, and categories land automatically on upgrade without clobbering user edits. `scripts/install.sh` now runs `attn init --merge` against existing installs.
+- Today panel surfaces overdue break duration (e.g. "over by 12m") once the interval is passed.
+- App/domain lists in the Today panel are scrollable inside the popup instead of resizing it.
+- Default watch lists pick up LibreOffice apps (productivity), `vercel.app` (coding), and `search.brave.com` (search).
+
+### Fixed
+- Manual break-start while the daemon is already idle-paused now swaps the pause reason to `manual` so the popup label and break-end behave predictably.
+- `active_session_seconds` keeps the live (still-open) focus interval ticking past `idle_after_secs` so long focused sessions get an accurate break countdown. Closed historical intervals still use the cap so they can't bridge across a real break.
+- Today list rows no longer swallow mouse buttons, so the new scroll views handle flick gestures correctly.
+
 ## [0.1.2] - 2026-05-14
 
 ### Changed
@@ -50,7 +63,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/0xPD33/attn/releases/tag/v0.1.3
 [0.1.2]: https://github.com/0xPD33/attn/releases/tag/v0.1.2
 [0.1.1]: https://github.com/0xPD33/attn/releases/tag/v0.1.1
 [0.1.0]: https://github.com/0xPD33/attn/releases/tag/v0.1.0
