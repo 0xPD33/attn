@@ -100,10 +100,12 @@ nix build .#default
 attn init                # writes ~/.config/attn/config.toml from the bundled default
 attn init --force        # overwrite
 $EDITOR ~/.config/attn/config.toml
-attn reload              # ask the running daemon to pick up changes
+# daemon auto-reloads on save (mtime watch); `attn reload` available as a manual nudge
 ```
 
-The default config covers the common app IDs and domain lists. Customize watch lists per category:
+The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** Edit [`config/default.toml`](./config/default.toml) and open a PR. That single file is what both the binary and the Nix flake embed.
+
+Customize watch lists per category in your own `~/.config/attn/config.toml`:
 
 ```toml
 poll_interval_secs = 60

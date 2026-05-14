@@ -198,15 +198,24 @@ When resolving the category for an app id, `apps.watch` is consulted first; if n
 
 Domain matching supports exact match and suffix match (`www.youtube.com` matches `youtube.com`), but never substring (`notyoutube.com` does not match `youtube.com`).
 
-The shipped default config covers 22 categories: coding, ai, design, media, productivity, chat, email, storage, meeting, video, music, scroll, news, shopping, finance, learning, search, reference, devops, travel, food, sports, health, read_later. Each category has a distinct hue in the popup palette.
+The shipped default config covers 22+ categories: coding, ai, design, media, productivity, chat, email, storage, meeting, video, music, scroll, news, shopping, finance, learning, search, reference, devops, travel, food, sports, health, read_later. Each category has a distinct hue in the popup palette.
+
+The full default config (top-level keys, watch lists, browser paths, terminal subprocess names, break thresholds) lives at `config/default.toml`. Both the Rust daemon (`include_str!`) and the Nix flake (`builtins.readFile`) read it from there, so contributors can add domains or categories with a single-file edit and no Rust or Nix knowledge.
 
 ## Break reminder
 
-When the daemon's `[breaks]` config is enabled, status includes `active_session_seconds` (contiguous tracked focus without an idle gap `>= min_break_secs`) and `break_overdue` (`active_session_seconds >= interval_secs && !paused`). The widget shows a subtle banner inviting a break; clicking the button (or running `attn break-start`) sets `paused_reason = manual`, closes the open interval, and stops opening new ones. `attn break-end` clears the pause, persists `session_reset_at = now` so the next session counter starts at zero, and reopens an interval for the current focus.
+When the daemon's `[breaks]` config is enabled, status includes `active_session_seconds` and `break_overdue` (`active_session_seconds >= interval_secs && !paused`). The widget shows a subtle banner inviting a break; clicking the button (or running `attn break-start`) sets `paused_reason = manual`, closes the open interval, and stops opening new ones. `attn break-end` clears the pause, persists `session_reset_at = now` so the next session counter starts at zero, and reopens an interval for the current focus.
 
 Auto-pause from Wayland idle uses the same state but with `paused_reason = idle` and auto-clears on the next `resumed` event.
 
 `attn set-breaks --enabled --interval --min-break` (or the in-popup settings sheet) writes overrides into `meta`, which the daemon layers on top of the TOML config at load time.
+
+### Active session computation
+
+`active_session_seconds` walks `app_intervals` newest-first and accumulates duration until it hits a gap `>= min_break_secs` or crosses `meta.session_reset_at`. Two defenses make this robust even when Wayland idle events are missed:
+
+- **Per-interval cap**: each interval's effective end is capped at `started_at + idle_after_secs`. A focused window left open while the user is away (no input, no focus change) creates an effective gap the walk then detects as a break, even without a Wayland `idled` event.
+- **`session_reset_at` marker**: set on `break_end` and on Wayland `resumed` (after an idle pause), it acts as a hard boundary the walk cannot cross.
 
 ## Daily totals & rebuild cooldown
 
