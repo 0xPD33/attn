@@ -1,0 +1,6 @@
+/target/
+/result
+/dist/
+*.tmp
+*.bak
+.DS_Store
