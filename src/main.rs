@@ -2557,6 +2557,7 @@ fn compute_active_session_seconds(
     db: &Connection,
     now: DateTime<Utc>,
     min_break_secs: i64,
+    idle_after_secs: i64,
 ) -> Result<i64> {
     let session_reset_at = meta_get(db, "session_reset_at")?
         .map(|v| parse_rfc3339_utc(&v))
@@ -2574,11 +2575,16 @@ fn compute_active_session_seconds(
     for r in rows {
         let (started_at, ended_at) = r?;
         let start = parse_rfc3339_utc(&started_at)?;
-        let end = match ended_at {
+        let raw_end = match ended_at {
             Some(s) => parse_rfc3339_utc(&s)?.min(now),
             None => now,
         };
-        if (last_start - end).num_seconds() > min_break_secs {
+        // Cap each interval at idle_after_secs from its start. Without input
+        // signals we can't tell "deeply focused" from "walked away with the
+        // window still focused"; the cap means a long-running open interval
+        // creates a gap the rest of the walk can detect as a break.
+        let end = (start + Duration::seconds(idle_after_secs)).min(raw_end);
+        if (last_start - end).num_seconds() >= min_break_secs {
             break;
         }
         if let Some(reset_at) = session_reset_at {
@@ -2667,7 +2673,12 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
     let active_session_seconds = if paused {
         0
     } else {
-        compute_active_session_seconds(db, now, config.breaks.min_break_secs)?
+        compute_active_session_seconds(
+            db,
+            now,
+            config.breaks.min_break_secs,
+            config.idle_after_secs,
+        )?
     };
     let break_overdue = config.breaks.enabled
         && !paused
