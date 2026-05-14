@@ -1,0 +1,25 @@
+figma-linux
+
+# Vector / illustration
+inkscape
+org.inkscape.Inkscape
+
+# Raster / painting
+gimp
+org.gimp.GIMP
+krita
+org.kde.krita
+
+# 3D
+blender
+org.blender.Blender
+godot
+org.godotengine.Godot
+
+# Photo
+darktable
+rawtherapee
+
+# Layout
+scribus
+boxy-svg

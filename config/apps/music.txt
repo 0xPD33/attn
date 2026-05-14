@@ -1,0 +1,11 @@
+spotify
+com.spotify.Client
+rhythmbox
+elisa
+strawberry
+amberol
+io.bassi.Amberol
+audacious
+lollypop
+tauon
+cmus

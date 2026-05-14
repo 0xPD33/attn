@@ -1,0 +1,44 @@
+# MOOCs
+coursera.org
+udemy.com
+edx.org
+khanacademy.org
+
+# Languages / curiosity
+brilliant.org
+duolingo.com
+babbel.com
+memrise.com
+rosetta.stone.com
+
+# Dev courses
+frontendmasters.com
+egghead.io
+pluralsight.com
+linkedin.com/learning
+
+# Practice
+leetcode.com
+hackerrank.com
+codewars.com
+exercism.org
+adventofcode.com
+advent-of-code.com
+projecteuler.net
+
+# YouTube edu surfaces
+youtube.com/learn
+youtube.com/edu
+
+# Skill / craft
+skillshare.com
+masterclass.com
+datacamp.com
+
+# Free / structured
+freecodecamp.org
+theodinproject.com
+fullstackopen.com
+roadmap.sh
+boot.dev
+codecademy.com

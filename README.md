@@ -103,7 +103,14 @@ $EDITOR ~/.config/attn/config.toml
 # daemon auto-reloads on save (mtime watch); `attn reload` available as a manual nudge
 ```
 
-The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** Edit [`config/default.toml`](./config/default.toml) and open a PR. That single file is what both the binary and the Nix flake embed.
+The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** The watch lists live in per-category text files (one item per line, `#` comments allowed):
+
+- `config/apps/<category>.txt` — Linux app IDs / executable names
+- `config/domains/<category>.txt` — domains for Chromium-family history matching
+
+Edit the relevant file, run `tools/sync-default-config.sh` to regenerate `config/default.toml`, and open a PR. CI verifies the regenerated TOML matches the per-category sources.
+
+Non-list runtime config (paths, intervals, browsers, terminals, breaks) lives in `config/runtime.toml`.
 
 Customize watch lists per category in your own `~/.config/attn/config.toml`:
 

@@ -1,0 +1,43 @@
+# Payments / banking
+paypal.com
+wise.com
+revolut.com
+n26.com
+
+# Payment infra
+stripe.com
+dashboard.stripe.com
+
+# Brokerages
+robinhood.com
+fidelity.com
+schwab.com
+vanguard.com
+etoro.com
+trade.com
+interactivebrokers.com
+
+# Crypto exchanges
+coinbase.com
+kraken.com
+binance.com
+bybit.com
+kucoin.com
+
+# Crypto wallets
+metamask.io
+phantom.app
+rabby.io
+
+# Budgeting
+mint.com
+ynab.com
+monarchmoney.com
+rocketmoney.com
+splitwise.com
+expensify.com
+
+# Markets / data
+tradingview.com
+yahoo.com/finance
+finance.yahoo.com

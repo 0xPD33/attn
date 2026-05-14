@@ -1,0 +1,50 @@
+# Amazon (regional TLDs)
+amazon.com
+amazon.de
+amazon.co.uk
+amazon.ca
+amazon.fr
+amazon.it
+amazon.es
+amazon.co.jp
+
+# Marketplaces
+ebay.com
+ebay.de
+ebay.co.uk
+etsy.com
+aliexpress.com
+temu.com
+shein.com
+
+# US big-box
+target.com
+walmart.com
+bestbuy.com
+costco.com
+
+# Home / furniture
+ikea.com
+wayfair.com
+newegg.com
+
+# Apparel
+zalando.com
+asos.com
+uniqlo.com
+hm.com
+zara.com
+
+# Outdoor / sport
+nike.com
+adidas.com
+patagonia.com
+rei.com
+
+# First-party
+apple.com
+store.steampowered.com
+
+# 3D printing
+thingiverse.com
+printables.com

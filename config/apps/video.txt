@@ -1,0 +1,9 @@
+mpv
+io.mpv.Mpv
+vlc
+org.videolan.VLC
+celluloid
+smplayer
+haruna
+stremio
+freetube

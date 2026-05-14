@@ -1,0 +1,68 @@
+# US tech
+theverge.com
+techcrunch.com
+arstechnica.com
+wired.com
+engadget.com
+9to5google.com
+9to5mac.com
+macrumors.com
+
+# US legacy
+nytimes.com
+washingtonpost.com
+wsj.com
+bloomberg.com
+politico.com
+thehill.com
+vox.com
+slate.com
+newyorker.com
+theatlantic.com
+vanityfair.com
+huffpost.com
+nbcnews.com
+cbsnews.com
+abcnews.go.com
+cnn.com
+foxnews.com
+drudgereport.com
+
+# International business
+ft.com
+economist.com
+reuters.com
+apnews.com
+
+# UK
+bbc.com
+bbc.co.uk
+theguardian.com
+
+# Public radio / explainer
+npr.org
+axios.com
+
+# DE / FR / ES / JP / multilingual
+spiegel.de
+zeit.de
+faz.net
+sueddeutsche.de
+welt.de
+lemonde.fr
+lefigaro.fr
+elpais.com
+elmundo.es
+asahi.com
+japantimes.co.jp
+thelocal.com
+dw.com
+
+# Newsletters / readers
+substack.com
+ground.news
+google.com/news
+news.google.com
+rss.app
+feedly.com
+inoreader.com

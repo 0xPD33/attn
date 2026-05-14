@@ -1,0 +1,16 @@
+com.mitchellh.ghostty
+ghostty
+wezterm
+kitty
+alacritty
+foot
+gnome-terminal
+konsole
+xterm
+urxvt
+terminator
+tilix
+warp
+dev.warp.Warp
+rio
+blackbox

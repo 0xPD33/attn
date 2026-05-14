@@ -1,0 +1,14 @@
+discord.com
+slack.com
+teams.microsoft.com
+web.whatsapp.com
+web.telegram.org
+messenger.com
+signal.org
+element.io
+app.element.io
+matrix.org
+irc.libera.chat
+mattermost.com
+rocket.chat
+zulip.com

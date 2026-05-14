@@ -1,0 +1,16 @@
+steam
+com.valvesoftware.Steam
+lutris
+net.lutris.Lutris
+heroic
+com.heroicgameslauncher.hgl
+bottles
+com.usebottles.bottles
+itch
+io.itch.itch
+prismlauncher
+org.prismlauncher.PrismLauncher
+minecraft-launcher
+polymc
+retroarch
+org.libretro.RetroArch

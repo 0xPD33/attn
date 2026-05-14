@@ -1,0 +1,14 @@
+wikipedia.org
+en.wikipedia.org
+de.wikipedia.org
+wiktionary.org
+wikidata.org
+commons.wikimedia.org
+archive.org
+web.archive.org
+scholar.google.com
+britannica.com
+merriam-webster.com
+dictionary.com
+thesaurus.com
+stackoverflow.com

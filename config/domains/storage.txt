@@ -1,0 +1,10 @@
+drive.google.com
+dropbox.com
+icloud.com
+onedrive.live.com
+mega.nz
+box.com
+pcloud.com
+sync.com
+filen.io
+tresorit.com

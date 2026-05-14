@@ -1,0 +1,12 @@
+open.spotify.com
+music.apple.com
+music.youtube.com
+soundcloud.com
+bandcamp.com
+tidal.com
+deezer.com
+music.amazon.com
+pandora.com
+qobuz.com
+audius.co
+last.fm

@@ -1,0 +1,98 @@
+# Source hosting
+github.com
+gist.github.com
+gitlab.com
+bitbucket.org
+codeberg.org
+sourcehut.org
+sr.ht
+
+# Q&A
+stackoverflow.com
+stackexchange.com
+serverfault.com
+superuser.com
+askubuntu.com
+
+# PaaS / hosting
+vercel.com
+netlify.com
+cloudflare.com
+developers.cloudflare.com
+railway.app
+railway.com
+fly.io
+render.com
+deno.com
+
+# DBaaS
+supabase.com
+planetscale.com
+neon.tech
+turso.tech
+xata.io
+
+# Cloud consoles
+console.aws.amazon.com
+cloud.google.com
+portal.azure.com
+console.digitalocean.com
+linode.com
+vultr.com
+
+# Package registries
+npmjs.com
+pypi.org
+crates.io
+rubygems.org
+packagist.org
+jsr.io
+hex.pm
+mvnrepository.com
+nuget.org
+
+# Web references
+developer.mozilla.org
+web.dev
+caniuse.com
+regex101.com
+godbolt.org
+
+# Language docs
+docs.python.org
+docs.rs
+doc.rust-lang.org
+nodejs.org
+deno.land
+
+# Framework docs
+react.dev
+nextjs.org
+vuejs.org
+svelte.dev
+remix.run
+qwik.dev
+tailwindcss.com
+typescriptlang.org
+biomejs.dev
+
+# Platform docs
+learn.microsoft.com
+developers.google.com
+developer.apple.com
+kubernetes.io
+helm.sh
+docker.com
+podman.io
+
+# Nix / ML
+nixos.org
+wiki.nixos.org
+search.nixos.org
+huggingface.co
+
+# Dev communities
+dev.to
+hashnode.com
+lobste.rs
+freecodecamp.org

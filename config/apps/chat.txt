@@ -1,0 +1,39 @@
+# Discord
+discord
+vesktop
+
+# Signal
+signal
+signal-desktop
+
+# Slack
+slack
+
+# Telegram
+telegram-desktop
+org.telegram.desktop
+
+# Matrix
+element
+element-desktop
+
+# Email (treated as chat-style messaging)
+thunderbird
+betterbird
+geary
+evolution
+mailspring
+
+# Microsoft / Zoom
+teams-for-linux
+zoom
+us.zoom.Zoom
+
+# Other
+gajim
+dino
+fractal
+io.gitlab.diasporg.diaspora
+ferdium
+rambox
+skypeforlinux

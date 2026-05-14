@@ -1,0 +1,43 @@
+# Observability
+datadoghq.com
+datadog.com
+sentry.io
+rollbar.com
+bugsnag.com
+honeycomb.io
+newrelic.com
+grafana.com
+grafana.net
+prometheus.io
+elastic.co
+kibana.co
+splunk.com
+logz.io
+
+# Incident response
+pagerduty.com
+opsgenie.com
+incident.io
+rootly.com
+statuspage.io
+betteruptime.com
+uptimerobot.com
+
+# IaC / config
+terraform.io
+hashicorp.com
+pulumi.com
+ansible.com
+
+# Container / networking
+docker.io
+hub.docker.com
+tailscale.com
+zerotier.com
+
+# CI / delivery
+argoproj.io
+argocd.com
+circleci.com
+buildkite.com
+drone.io

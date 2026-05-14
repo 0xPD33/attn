@@ -1,0 +1,16 @@
+mail.google.com
+outlook.live.com
+outlook.office.com
+mail.proton.me
+fastmail.com
+mail.yahoo.com
+mail.aol.com
+mail.zoho.com
+tutanota.com
+tuta.com
+hey.com
+missiveapp.com
+superhuman.com
+mailchimp.com
+convertkit.com
+buttondown.email

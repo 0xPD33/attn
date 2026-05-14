@@ -1,0 +1,22 @@
+# Delivery
+doordash.com
+ubereats.com
+grubhub.com
+deliveroo.com
+justeat.com
+
+# Discovery / reservations
+yelp.com
+opentable.com
+resy.com
+
+# Recipes
+allrecipes.com
+foodnetwork.com
+seriouseats.com
+bonappetit.com
+cooking.nytimes.com
+smittenkitchen.com
+epicurious.com
+thekitchn.com
+food52.com

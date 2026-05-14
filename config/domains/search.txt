@@ -1,0 +1,11 @@
+google.com
+www.google.com
+duckduckgo.com
+kagi.com
+brave.com/search
+ecosia.org
+bing.com
+qwant.com
+startpage.com
+you.com
+wolframalpha.com

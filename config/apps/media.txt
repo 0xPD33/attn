@@ -1,0 +1,22 @@
+# Video editors
+kdenlive
+org.kde.kdenlive
+shotcut
+org.shotcut.Shotcut
+openshot
+davinci-resolve
+blackmagic-design-davinci-resolve
+
+# Audio editors
+audacity
+org.audacityteam.Audacity
+ardour
+org.ardour.Ardour
+lmms
+io.lmms.LMMS
+
+# Streaming / capture
+obs
+com.obsproject.Studio
+handbrake
+fr.handbrake.ghb

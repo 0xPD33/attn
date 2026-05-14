@@ -1,0 +1,38 @@
+# VS Code family
+code
+code-insiders
+vscodium
+codium
+cursor
+windsurf
+zed
+dev.zed.Zed
+antigravity
+
+# Sublime / lightweight
+sublime_text
+lapce
+
+# JetBrains family
+android-studio
+jetbrains-toolbox
+intellij-idea-ultimate
+intellij-idea-community
+webstorm
+pycharm
+pycharm-community
+goland
+rustrover
+phpstorm
+rubymine
+clion
+datagrip
+rider
+fleet
+
+# Data science
+positron
+rstudio
+spyder
+thonny
+geany

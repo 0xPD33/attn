@@ -1,0 +1,16 @@
+obsidian
+md.obsidian.Obsidian
+logseq
+com.logseq.Logseq
+joplin
+net.cozic.joplin_desktop
+notion-app
+anytype
+zettlr
+standardnotes
+appflowy
+io.appflowy.AppFlowy
+trilium
+marktext
+com.github.marktext.marktext
+ghostwriter

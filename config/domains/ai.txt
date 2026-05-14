@@ -1,0 +1,65 @@
+# Chat assistants
+chatgpt.com
+claude.ai
+gemini.google.com
+anthropic.com
+openai.com
+platform.openai.com
+poe.com
+perplexity.ai
+you.com
+mistral.ai
+deepseek.com
+chat.deepseek.com
+kimi.moonshot.cn
+grok.com
+x.ai
+copilot.microsoft.com
+labs.google
+console.anthropic.com
+aistudio.google.com
+
+# AI-assisted coding
+cursor.sh
+cursor.com
+lovable.dev
+v0.dev
+bolt.new
+replit.com
+codeium.com
+windsurf.com
+sourcegraph.com
+magic.dev
+factory.ai
+devin.ai
+cognition.ai
+
+# Self-host / inference
+ollama.com
+lmstudio.ai
+groq.com
+fireworks.ai
+together.ai
+replicate.com
+
+# Image / media generation
+civitai.com
+leonardo.ai
+runwayml.com
+elevenlabs.io
+suno.com
+udio.com
+ideogram.ai
+
+# Aggregators / model platforms
+openrouter.ai
+anyscale.com
+modal.com
+wandb.ai
+
+# Companion / character
+character.ai
+characters.ai
+huggingface.co
+labs.openai.com
+playground.openai.com
