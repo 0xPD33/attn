@@ -38,7 +38,7 @@ Requires [niri](https://github.com/YaLTeR/niri) running (attn reads focus events
 curl -fsSL https://raw.githubusercontent.com/0xPD33/attn/main/scripts/install.sh | sh
 ```
 
-What it does: fetches the latest GitHub Release tarball, verifies its sha256, places the `attn` binary at `~/.local/bin/attn`, runs `attn init` to write the default config, and drops a systemd user unit at `~/.config/systemd/user/attn.service`. It does **not** enable or start the service unless you set `ATTN_START=1`.
+What it does: fetches the latest GitHub Release tarball, verifies its sha256, places the `attn` binary at `~/.local/bin/attn`, runs `attn init` or `attn init --merge` for the config, and drops a systemd user unit at `~/.config/systemd/user/attn.service`. It does **not** enable or start the service unless you set `ATTN_START=1`.
 
 Environment overrides: `ATTN_VERSION=v0.1.0` to pin a tag, `ATTN_PREFIX=$HOME/bin` for a different install dir, `ATTN_SYSTEMD=0` to skip the systemd unit, `ATTN_START=1` to enable + start the service immediately, `ATTN_SKIP_NIRI_CHECK=1` to install without niri.
 
@@ -98,6 +98,7 @@ nix build .#default
 
 ```sh
 attn init                # writes ~/.config/attn/config.toml from the bundled default
+attn init --merge        # add new bundled defaults to an existing config
 attn init --force        # overwrite
 $EDITOR ~/.config/attn/config.toml
 # daemon auto-reloads on save (mtime watch); `attn reload` available as a manual nudge
@@ -105,8 +106,8 @@ $EDITOR ~/.config/attn/config.toml
 
 The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** The watch lists live in per-category text files (one item per line, `#` comments allowed):
 
-- `config/apps/<category>.txt` — Linux app IDs / executable names
-- `config/domains/<category>.txt` — domains for Chromium-family history matching
+- `config/apps/<category>.txt` - Linux app IDs / executable names
+- `config/domains/<category>.txt` - domains for Chromium-family history matching
 
 Edit the relevant file, run `tools/sync-default-config.sh` to regenerate `config/default.toml`, and open a PR. CI verifies the regenerated TOML matches the per-category sources.
 
@@ -169,7 +170,8 @@ attn daemon
 attn daemon              run the long-running collector
 attn status --json       print current-day status as JSON (used by Quickshell)
 attn reload              reload ~/.config/attn/config.toml without restarting
-attn init [--force]      write the default config
+attn init [--merge|--force]
+                         write or update the default config
 attn doctor              check niri IPC, config parsing, state DB, browser DBs, socket
 ```
 

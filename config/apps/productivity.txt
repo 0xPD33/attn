@@ -14,3 +14,10 @@ trilium
 marktext
 com.github.marktext.marktext
 ghostwriter
+libreoffice
+libreoffice-startcenter
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-draw
+soffice

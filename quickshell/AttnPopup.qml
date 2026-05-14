@@ -40,6 +40,7 @@ PopupWindow {
 
     property bool settingsOpen: false
     property bool animationsReady: false
+    readonly property int todayListMaxHeight: 264
 
     signal breakStartRequested()
     signal breakEndRequested()
@@ -297,6 +298,25 @@ PopupWindow {
         return out.slice(0, 4);
     }
 
+    function applyBreakSettings(enabled, interval, minBreak) {
+        attnSetBreaks.desiredEnabled = enabled;
+        attnSetBreaks.desiredInterval = interval;
+        attnSetBreaks.desiredMinBreak = minBreak;
+        attnSetBreaks.running = true;
+    }
+
+    function requestBreakStart() {
+        if (!attnBreakStart.running) {
+            attnBreakStart.exec(attnBreakStart.command);
+        }
+    }
+
+    function requestBreakEnd() {
+        if (!attnBreakEnd.running) {
+            attnBreakEnd.exec(attnBreakEnd.command);
+        }
+    }
+
     Rectangle {
         id: content
         anchors.fill: parent
@@ -448,11 +468,12 @@ PopupWindow {
                     id: breakChip
                     readonly property bool alert: popup.breakOverdue || popup.paused
                     readonly property int remainingSecs: Math.max(0, popup.breakIntervalSecs - popup.activeSessionSeconds)
+                    readonly property int overdueSecs: Math.max(0, popup.activeSessionSeconds - popup.breakIntervalSecs)
                     readonly property real progress: Math.min(1.0, popup.activeSessionSeconds / Math.max(1, popup.breakIntervalSecs))
                     readonly property string chipText: {
                         if (popup.paused && popup.pausedReason === "manual") return "paused";
                         if (popup.paused && popup.pausedReason === "idle") return "on break";
-                        if (popup.breakOverdue) return "take a break";
+                        if (popup.breakOverdue) return overdueSecs > 0 ? "over by " + popup.formatDuration(overdueSecs) : "take a break";
                         return "break in " + popup.formatDuration(remainingSecs);
                     }
 
@@ -677,7 +698,7 @@ PopupWindow {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Time for a break — you've been at the screen for " + popup.formatDuration(popup.activeSessionSeconds) + "."
+                        text: "Time for a break - you've been at the screen for " + popup.formatDuration(popup.activeSessionSeconds) + "."
                         color: popup.textColor
                         font.family: popup.fontFamily
                         font.pixelSize: 11
@@ -711,7 +732,7 @@ PopupWindow {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: attnBreakStart.running = true
+                            onClicked: popup.requestBreakStart()
                         }
                     }
                 }
@@ -960,11 +981,18 @@ PopupWindow {
                         visible: popup.trackedApps().length > 0
                         Layout.bottomMargin: 4
                     }
-                    Repeater {
+                    ListView {
+                        id: appsList
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(contentHeight, popup.todayListMaxHeight)
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        interactive: contentHeight > height
+                        spacing: 2
                         model: popup.trackedApps()
                         delegate: AttnRow {
                             required property var modelData
-                            Layout.fillWidth: true
+                            width: Math.max(0, appsList.width - (appsList.interactive ? 8 : 0))
                             icon: popup.iconFor(modelData.id, modelData.category, "app")
                             label: popup.cleanAppName(modelData.id)
                             category: modelData.category || ""
@@ -979,6 +1007,20 @@ PopupWindow {
                             watchedBg: popup.watchedBg
                             fontFamily: popup.fontFamily
                             animateBar: popup.animationsReady
+                        }
+                        ScrollBar.vertical: ScrollBar {
+                            policy: appsList.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                            width: 5
+                            contentItem: Rectangle {
+                                implicitWidth: 5
+                                radius: 2
+                                color: Qt.rgba(popup.watchedAccent.r, popup.watchedAccent.g, popup.watchedAccent.b, 0.65)
+                            }
+                            background: Rectangle {
+                                implicitWidth: 5
+                                radius: 2
+                                color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.14)
+                            }
                         }
                     }
                 }
@@ -998,11 +1040,18 @@ PopupWindow {
                         visible: popup.trackedDomains().length > 0
                         Layout.bottomMargin: 4
                     }
-                    Repeater {
+                    ListView {
+                        id: domainsList
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(contentHeight, popup.todayListMaxHeight)
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        interactive: contentHeight > height
+                        spacing: 2
                         model: popup.trackedDomains()
                         delegate: AttnRow {
                             required property var modelData
-                            Layout.fillWidth: true
+                            width: Math.max(0, domainsList.width - (domainsList.interactive ? 8 : 0))
                             icon: popup.iconFor(modelData.domain, modelData.category, "domain")
                             label: popup.cleanDomainName(modelData.domain)
                             category: modelData.category || ""
@@ -1017,6 +1066,20 @@ PopupWindow {
                             watchedBg: popup.watchedBg
                             fontFamily: popup.fontFamily
                             animateBar: popup.animationsReady
+                        }
+                        ScrollBar.vertical: ScrollBar {
+                            policy: domainsList.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                            width: 5
+                            contentItem: Rectangle {
+                                implicitWidth: 5
+                                radius: 2
+                                color: Qt.rgba(popup.watchedAccent.r, popup.watchedAccent.g, popup.watchedAccent.b, 0.65)
+                            }
+                            background: Rectangle {
+                                implicitWidth: 5
+                                radius: 2
+                                color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.14)
+                            }
                         }
                     }
                 }
@@ -1043,13 +1106,6 @@ PopupWindow {
                 "--interval=" + String(desiredInterval),
                 "--min-break=" + String(desiredMinBreak)]
             onExited: popup.statusRefreshRequested()
-        }
-
-        function applyBreakSettings(enabled, interval, minBreak) {
-            attnSetBreaks.desiredEnabled = enabled;
-            attnSetBreaks.desiredInterval = interval;
-            attnSetBreaks.desiredMinBreak = minBreak;
-            attnSetBreaks.running = true;
         }
 
         Rectangle {
@@ -1388,9 +1444,9 @@ PopupWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             if (popup.paused) {
-                                attnBreakEnd.running = true;
+                                popup.requestBreakEnd();
                             } else {
-                                attnBreakStart.running = true;
+                                popup.requestBreakStart();
                             }
                         }
                     }

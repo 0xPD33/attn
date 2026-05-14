@@ -111,7 +111,8 @@ if [ ! -f "$CONFIG_PATH" ]; then
   info "writing default config..."
   "$ATTN_PREFIX/attn" init || yellow "could not write default config; run 'attn init' manually."
 else
-  info "config already exists at $CONFIG_PATH (not overwriting)"
+  info "merging new bundled defaults into existing config..."
+  "$ATTN_PREFIX/attn" init --merge || yellow "could not merge default config; run 'attn init --merge' manually."
 fi
 
 UNIT_DIR="$HOME/.config/systemd/user"

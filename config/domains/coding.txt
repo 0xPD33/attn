@@ -16,6 +16,7 @@ askubuntu.com
 
 # PaaS / hosting
 vercel.com
+vercel.app
 netlify.com
 cloudflare.com
 developers.cloudflare.com

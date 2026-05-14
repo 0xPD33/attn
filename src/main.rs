@@ -89,8 +89,16 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("init") => {
-            let force = args.any(|arg| arg == "--force");
-            init_config(force)
+            let mut force = false;
+            let mut merge = false;
+            for arg in args {
+                match arg.as_str() {
+                    "--force" => force = true,
+                    "--merge" => merge = true,
+                    other => bail!("unknown init option: {other}"),
+                }
+            }
+            init_config(force, merge)
         }
         Some("doctor") => run_doctor(),
         Some("--help") | Some("-h") | None => {
@@ -103,15 +111,29 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn init [--force]\n  attn doctor"
+        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn init [--force|--merge]\n  attn doctor"
     );
 }
 
-fn init_config(force: bool) -> Result<()> {
+fn init_config(force: bool, merge: bool) -> Result<()> {
     let path = expand_path(DEFAULT_CONFIG_PATH);
+    if path.exists() && merge {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read config {}", path.display()))?;
+        let user_config = toml::from_str::<Config>(&raw)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        let mut config = bundled_default_config()?;
+        config.apply_user_config(user_config);
+        let merged = toml::to_string_pretty(&config).context("failed to serialize merged config")?;
+        ensure_parent_dir(&path)?;
+        fs::write(&path, merged)
+            .with_context(|| format!("failed to write config {}", path.display()))?;
+        println!("merged defaults into {}", path.display());
+        return Ok(());
+    }
     if path.exists() && !force {
         bail!(
-            "config already exists at {}; pass --force to overwrite",
+            "config already exists at {}; pass --merge to add bundled defaults or --force to overwrite",
             path.display()
         );
     }
@@ -122,7 +144,7 @@ fn init_config(force: bool) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Config {
     #[serde(default = "default_poll_interval_secs")]
     poll_interval_secs: u64,
@@ -148,7 +170,7 @@ struct Config {
     breaks: BreaksConfig,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BreaksConfig {
     #[serde(default = "default_breaks_enabled")]
     enabled: bool,
@@ -172,7 +194,7 @@ fn default_breaks_enabled() -> bool { true }
 fn default_breaks_interval_secs() -> i64 { 3600 }
 fn default_breaks_min_break_secs() -> i64 { 300 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct TerminalsConfig {
     #[serde(default = "default_terminal_poll_secs")]
     poll_secs: u64,
@@ -212,7 +234,7 @@ fn default_terminals_config() -> TerminalsConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BudgetEntry {
     #[serde(default)]
     daily_budget_secs: i64,
@@ -222,7 +244,7 @@ fn default_budgets() -> BTreeMap<String, BudgetEntry> {
     BTreeMap::new()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct DisplayConfig {
     #[serde(default = "default_domains_show_top")]
     domains_show_top: usize,
@@ -247,19 +269,19 @@ fn default_domains_min_seconds() -> i64 {
     30
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AppsConfig {
     #[serde(default = "default_app_watch")]
     watch: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct DomainsConfig {
     #[serde(default = "default_domain_watch")]
     watch: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BrowserConfig {
     #[serde(default)]
     app_ids: Vec<String>,
@@ -712,19 +734,9 @@ fn default_socket_path() -> PathBuf {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            poll_interval_secs: default_poll_interval_secs(),
-            idle_after_secs: default_idle_after_secs(),
-            socket_path: default_socket_path(),
-            state_path: default_state_path(),
-            apps: AppsConfig::default(),
-            domains: DomainsConfig::default(),
-            browsers: default_browsers(),
-            display: DisplayConfig::default(),
-            budgets: default_budgets(),
-            terminals: default_terminals_config(),
-            breaks: BreaksConfig::default(),
-        }
+        bundled_default_config()
+            .expect("bundled default config must parse")
+            .normalized()
     }
 }
 
@@ -737,8 +749,11 @@ impl Config {
         let config = if path.exists() {
             let raw = fs::read_to_string(path)
                 .with_context(|| format!("failed to read config {}", path.display()))?;
-            toml::from_str::<Config>(&raw)
-                .with_context(|| format!("failed to parse config {}", path.display()))?
+            let user_config = toml::from_str::<Config>(&raw)
+                .with_context(|| format!("failed to parse config {}", path.display()))?;
+            let mut config = bundled_default_config()?;
+            config.apply_user_config(user_config);
+            config
         } else {
             Config::default()
         };
@@ -758,6 +773,25 @@ impl Config {
                 .collect::<Vec<_>>();
         }
         self
+    }
+
+    fn apply_user_config(&mut self, user: Config) {
+        self.poll_interval_secs = user.poll_interval_secs;
+        self.idle_after_secs = user.idle_after_secs;
+        self.socket_path = user.socket_path;
+        self.state_path = user.state_path;
+        self.display = user.display;
+        self.budgets = user.budgets;
+        self.breaks = user.breaks;
+
+        for (name, browser) in user.browsers {
+            self.browsers.insert(name, browser);
+        }
+
+        self.terminals.poll_secs = user.terminals.poll_secs;
+        merge_string_lists(&mut self.terminals.apps, user.terminals.apps);
+        merge_string_lists(&mut self.apps.watch, user.apps.watch);
+        merge_string_lists(&mut self.domains.watch, user.domains.watch);
     }
 
     fn validate(&self) -> Result<()> {
@@ -824,6 +858,24 @@ impl Config {
             .values()
             .flat_map(|browser| browser.app_ids.iter().cloned())
             .collect()
+    }
+}
+
+fn bundled_default_config() -> Result<Config> {
+    toml::from_str::<Config>(DEFAULT_CONFIG_TOML).context("failed to parse bundled default config")
+}
+
+fn merge_string_lists(
+    base: &mut BTreeMap<String, Vec<String>>,
+    overlay: BTreeMap<String, Vec<String>>,
+) {
+    for (category, values) in overlay {
+        let entry = base.entry(category).or_default();
+        for value in values {
+            if !entry.iter().any(|existing| existing == &value) {
+                entry.push(value);
+            }
+        }
     }
 }
 
@@ -1476,8 +1528,12 @@ fn load_breaks_override(db: &Connection, breaks: &mut BreaksConfig) -> Result<()
 fn set_pause(state: &AppState, reason: PauseReason) -> Result<PauseResponse> {
     let now = Utc::now();
     let mut current = state.tracking_state.lock().unwrap();
-    if current.is_some() {
-        let info = current.unwrap();
+    if let Some(info) = current.as_mut() {
+        if info.reason != reason {
+            info.reason = reason;
+            let db = state.db.lock().unwrap();
+            persist_pause_state(&db, Some(*info))?;
+        }
         return Ok(PauseResponse {
             ok: true,
             paused: true,
@@ -2238,15 +2294,19 @@ fn compute_active_session_seconds(
     for r in rows {
         let (started_at, ended_at) = r?;
         let start = parse_rfc3339_utc(&started_at)?;
-        let raw_end = match ended_at {
-            Some(s) => parse_rfc3339_utc(&s)?.min(now),
-            None => now,
+        let (raw_end, is_open) = match ended_at {
+            Some(s) => (parse_rfc3339_utc(&s)?.min(now), false),
+            None => (now, true),
         };
-        // Cap each interval at idle_after_secs from its start. Without input
-        // signals we can't tell "deeply focused" from "walked away with the
-        // window still focused"; the cap means a long-running open interval
-        // creates a gap the rest of the walk can detect as a break.
-        let end = (start + Duration::seconds(idle_after_secs)).min(raw_end);
+        let raw_end = raw_end.max(start);
+        // Keep the live interval moving for break reminders. Closed intervals
+        // still use the idle cap so historical stale focus does not bridge
+        // across a real break.
+        let end = if is_open {
+            raw_end
+        } else {
+            (start + Duration::seconds(idle_after_secs.max(1))).min(raw_end)
+        };
         if (last_start - end).num_seconds() >= min_break_secs {
             break;
         }
@@ -3608,6 +3668,39 @@ mod tests {
     }
 
     #[test]
+    fn config_default_uses_generated_default_toml() {
+        let config = Config::default();
+        assert_eq!(config.category_for_app("positron"), Some("coding".to_string()));
+        assert_eq!(config.category_for_domain("vercel.com"), Some("coding".to_string()));
+    }
+
+    #[test]
+    fn user_watch_lists_add_to_bundled_defaults() {
+        let path = unique_temp_db_path("attn-merged-config");
+        fs::write(
+            &path,
+            r#"
+            [apps.watch]
+            coding = ["my-editor"]
+
+            [domains.watch]
+            learning = ["example.edu"]
+            "#,
+        )
+        .unwrap();
+        let config = Config::load_from_path(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(config.category_for_app("my-editor"), Some("coding".to_string()));
+        assert_eq!(config.category_for_app("positron"), Some("coding".to_string()));
+        assert_eq!(
+            config.category_for_domain("example.edu"),
+            Some("learning".to_string())
+        );
+        assert_eq!(config.category_for_domain("vercel.com"), Some("coding".to_string()));
+    }
+
+    #[test]
     fn invalid_config_rejects_zero_poll_interval() {
         let path = unique_temp_db_path("attn-invalid-config");
         fs::write(
@@ -4260,6 +4353,58 @@ mod tests {
         drop(client);
 
         handle_client(state, server).unwrap();
+    }
+
+    #[test]
+    fn manual_break_start_converts_idle_pause() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let paused_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let idle_pause = PauseInfo {
+            at: paused_at,
+            reason: PauseReason::Idle,
+        };
+        persist_pause_state(&db, Some(idle_pause)).unwrap();
+
+        let state = AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(Some(idle_pause))),
+        };
+
+        let response = set_pause(&state, PauseReason::Manual).unwrap();
+        assert!(response.ok);
+        assert!(response.paused);
+        assert_eq!(response.paused_reason.as_deref(), Some("manual"));
+        assert_eq!(
+            state.tracking_state.lock().unwrap().unwrap().reason,
+            PauseReason::Manual
+        );
+        let persisted_reason = {
+            let db = state.db.lock().unwrap();
+            meta_get(&db, "paused_reason").unwrap()
+        };
+        assert_eq!(persisted_reason.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn active_session_counts_live_open_interval_past_idle_cap() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 11, 11, 5, 0).unwrap();
+        db.execute(
+            "INSERT INTO app_intervals(started_at, app_id, window_title)
+             VALUES (?1, 'code', 'Editor')",
+            params![(now - Duration::minutes(65)).to_rfc3339()],
+        )
+        .unwrap();
+
+        let seconds = compute_active_session_seconds(&db, now, 300, 300).unwrap();
+
+        assert_eq!(seconds, 65 * 60);
     }
 
     #[test]
