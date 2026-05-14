@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-14
+
+### Fixed
+- `active_session_seconds` now treats a focused-but-idle window as a break. Previously, leaving the PC with the same window focused kept the session counter ticking because no focus-change event fired and the open interval never had a gap. The session walk now caps each interval at `idle_after_secs` from its start, so a long-running open interval creates an effective gap that the existing break detection picks up.
+
 ## [0.1.0] - 2026-05-14
 
 Initial public release.
@@ -37,5 +42,6 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/0xPD33/attn/releases/tag/v0.1.1
 [0.1.0]: https://github.com/0xPD33/attn/releases/tag/v0.1.0
