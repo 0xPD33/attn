@@ -1,4 +1,6 @@
 mod browsers;
+mod focus;
+mod notifications;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
@@ -18,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
-mod focus;
 
 const DEFAULT_CONFIG_PATH: &str = "~/.config/attn/config.toml";
 const DEFAULT_STATE_PATH: &str = "~/.local/state/attn/attn.sqlite";
@@ -171,6 +172,8 @@ struct Config {
     breaks: BreaksConfig,
     #[serde(default)]
     focus_source: FocusSourceConfig,
+    #[serde(default)]
+    notifications: NotificationsConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -212,6 +215,29 @@ impl Default for FocusSourceConfig {
 fn default_focus_source_kind() -> String {
     "auto".to_string()
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NotificationsConfig {
+    #[serde(default = "default_notifications_enabled")]
+    enabled: bool,
+    #[serde(default = "default_true")]
+    break_overdue: bool,
+    #[serde(default = "default_true")]
+    budget_exceeded: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+            break_overdue: default_true(),
+            budget_exceeded: default_true(),
+        }
+    }
+}
+
+fn default_notifications_enabled() -> bool { true }
+fn default_true() -> bool { true }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TerminalsConfig {
@@ -850,6 +876,7 @@ impl Config {
         self.budgets = user.budgets;
         self.breaks = user.breaks;
         self.focus_source = user.focus_source;
+        self.notifications = user.notifications;
 
         for (name, browser) in user.browsers {
             self.browsers.insert(name, browser);
@@ -957,6 +984,7 @@ struct AppState {
     /// Resolved focus source kind (e.g. "niri", "hyprland", "sway", "river").
     /// Set once at daemon startup and never changes.
     focus_source_kind: Arc<String>,
+    notifier: Arc<dyn notifications::NotificationSink>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1034,6 +1062,11 @@ fn run_daemon() -> Result<()> {
     };
 
     let initial_pause = load_pause_state(&db)?;
+    let notifier: Arc<dyn notifications::NotificationSink> = if config.notifications.enabled {
+        Arc::new(notifications::DesktopNotifier::new())
+    } else {
+        Arc::new(notifications::NullNotifier)
+    };
     let state = AppState {
         config: Arc::new(Mutex::new(config.clone())),
         db: Arc::new(Mutex::new(db)),
@@ -1042,6 +1075,7 @@ fn run_daemon() -> Result<()> {
         last_rebuild: Arc::new(Mutex::new(None)),
         tracking_state: Arc::new(Mutex::new(initial_pause)),
         focus_source_kind: Arc::new(resolved_kind),
+        notifier,
     };
     install_shutdown_handler(state.clone())?;
     let listener = bind_socket(&config.socket_path)?;
@@ -1093,6 +1127,14 @@ fn run_daemon() -> Result<()> {
             }
         }
         thread::sleep(HEARTBEAT_INTERVAL);
+    });
+
+    let notify_state = state.clone();
+    thread::spawn(move || loop {
+        thread::sleep(StdDuration::from_secs(60));
+        if let Err(error) = run_notification_check(&notify_state) {
+            eprintln!("attn notification check error: {error:#}");
+        }
     });
 
     let config_watch_state = state.clone();
@@ -2412,6 +2454,90 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
     })
 }
 
+fn run_notification_check(state: &AppState) -> Result<()> {
+    let config = state.config.lock().unwrap().clone();
+    if !config.notifications.enabled {
+        return Ok(());
+    }
+    let db = state.db.lock().unwrap();
+    let now = Utc::now();
+    let day = Local::now().date_naive();
+    let day_string = day.to_string();
+
+    // Break-overdue notification
+    if config.notifications.break_overdue && config.breaks.enabled {
+        let paused = load_pause_state(&db)?.is_some();
+        if !paused {
+            let active_secs = compute_active_session_seconds(
+                &db,
+                now,
+                config.breaks.min_break_secs,
+                config.idle_after_secs,
+            )?;
+            if active_secs >= config.breaks.interval_secs {
+                // Use session_reset_at (or empty string) as the per-session dedup key.
+                let session_id = meta_get(&db, "session_reset_at")?
+                    .unwrap_or_default();
+                let notified_session = meta_get(&db, "notified_break_overdue")?
+                    .unwrap_or_default();
+                if notified_session != session_id {
+                    let overdue_secs = active_secs - config.breaks.interval_secs;
+                    if let Err(e) = state.notifier.notify(
+                        notifications::NotificationKind::BreakOverdue { active_secs, overdue_secs },
+                    ) {
+                        eprintln!("attn notify break_overdue: {e:#}");
+                    }
+                    meta_set(&db, "notified_break_overdue", &session_id)?;
+                }
+            }
+        }
+    }
+
+    // Budget-exceeded notifications
+    if config.notifications.budget_exceeded {
+        let browser_ids = config.browser_app_ids();
+        let apps = load_app_status(&db, &day_string)?;
+        let domains = load_domain_status(&db, &day_string, &config.display)?;
+
+        let mut category_totals: BTreeMap<String, i64> = BTreeMap::new();
+        for app in &apps {
+            if let Some(cat) = &app.category {
+                if browser_ids.contains(&normalize_id(&app.id)) {
+                    continue;
+                }
+                *category_totals.entry(cat.clone()).or_default() += app.seconds;
+            }
+        }
+        for domain in &domains {
+            if let Some(cat) = &domain.category {
+                *category_totals.entry(cat.clone()).or_default() += domain.seconds;
+            }
+        }
+
+        for (name, seconds) in &category_totals {
+            let Some(budget) = config.budgets.get(name) else { continue };
+            if budget.daily_budget_secs <= 0 { continue; }
+            if *seconds <= budget.daily_budget_secs { continue; }
+
+            let dedup_key = format!("notified_budget:{}:{}", day_string, name);
+            if meta_get(&db, &dedup_key)?.is_none() {
+                if let Err(e) = state.notifier.notify(
+                    notifications::NotificationKind::BudgetExceeded {
+                        category: name.clone(),
+                        seconds: *seconds,
+                        budget_secs: budget.daily_budget_secs,
+                    },
+                ) {
+                    eprintln!("attn notify budget_exceeded({name}): {e:#}");
+                }
+                meta_set(&db, &dedup_key, "1")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result<DaySummary> {
     let day_string = day.to_string();
     let browser_ids = config.browser_app_ids();
@@ -3157,6 +3283,20 @@ fn run_doctor() -> Result<()> {
         }
     }
 
+    match probe_dbus_notifications() {
+        Ok(true) => println!("dbus notifications: ok"),
+        Ok(false) => {
+            println!("dbus notifications: absent (no notification daemon found on session bus)");
+            warnings.push(
+                "desktop notifications unavailable; install a notification daemon (mako, dunst, etc.)".into(),
+            );
+        }
+        Err(error) => {
+            println!("dbus notifications: error: {error:#}");
+            warnings.push(format!("dbus notifications probe failed: {error:#}"));
+        }
+    }
+
     for (name, browser) in &config.browsers {
         match discover_history_paths(browser) {
             Ok(paths) if paths.is_empty() => {
@@ -3264,6 +3404,24 @@ fn probe_dbus_login1() -> Result<bool> {
     ) {
         Ok(p) => p,
         Err(error) => bail!("login1 proxy failed: {error:#}"),
+    };
+    Ok(proxy.introspect().is_ok())
+}
+
+fn probe_dbus_notifications() -> Result<bool> {
+    use zbus::blocking::Connection as ZConnection;
+    let conn = match ZConnection::session() {
+        Ok(c) => c,
+        Err(error) => bail!("session bus connect failed: {error:#}"),
+    };
+    let proxy = match zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+    ) {
+        Ok(p) => p,
+        Err(error) => bail!("notifications proxy failed: {error:#}"),
     };
     Ok(proxy.introspect().is_ok())
 }
@@ -3378,6 +3536,7 @@ fn bool_to_int(value: bool) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notifications::NotificationSink as _;
 
     #[test]
     fn domain_matching_is_suffix_safe() {
@@ -4081,6 +4240,7 @@ mod tests {
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
         };
 
         swap_state_db_for_reload(&state, &old_config, &new_config, now).unwrap();
@@ -4128,6 +4288,7 @@ mod tests {
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
         };
 
         let browser = BrowserConfig {
@@ -4228,6 +4389,7 @@ mod tests {
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
         };
         let (client, server) = UnixStream::pair().unwrap();
         drop(client);
@@ -4254,6 +4416,7 @@ mod tests {
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(Some(idle_pause))),
             focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
         };
 
         let response = set_pause(&state, PauseReason::Manual).unwrap();
@@ -4510,5 +4673,170 @@ mod tests {
         };
         let json = serde_json::to_string(&cs).unwrap();
         assert!(json.contains("\"over_budget\":true"), "over_budget:true should appear in JSON: {json}");
+    }
+
+    #[test]
+    fn break_overdue_notification_records_kind() {
+        let rec = notifications::RecordingNotifier::new();
+        rec.notify(notifications::NotificationKind::BreakOverdue {
+            active_secs: 3720,
+            overdue_secs: 120,
+        })
+        .unwrap();
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], "break_overdue");
+    }
+
+    #[test]
+    fn budget_exceeded_notification_dedup_fires_once_across_many_iterations() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+
+        let rec = Arc::new(notifications::RecordingNotifier::new());
+        let mut config = Config::default();
+        config.budgets.insert(
+            "scroll".to_string(),
+            BudgetEntry { daily_budget_secs: 30 },
+        );
+        config.notifications.enabled = true;
+        config.notifications.budget_exceeded = true;
+
+        let day = Local::now().date_naive();
+        let day_string = day.to_string();
+
+        db.execute(
+            "INSERT INTO daily_domain_totals(day, domain, seconds, watch_category)
+             VALUES (?1, 'youtube.com', 60, 'scroll')",
+            params![day_string],
+        )
+        .unwrap();
+
+        let state = AppState {
+            config: Arc::new(Mutex::new(config.clone())),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: rec.clone(),
+        };
+
+        for _ in 0..100 {
+            run_notification_check(&state).unwrap();
+        }
+
+        assert_eq!(rec.call_count(), 1, "budget notification should fire exactly once");
+    }
+
+    #[test]
+    fn break_overdue_notification_dedup_fires_once_per_session() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+
+        let rec = Arc::new(notifications::RecordingNotifier::new());
+        let now = Utc::now();
+
+        db.execute(
+            "INSERT INTO app_intervals(started_at, app_id, window_title)
+             VALUES (?1, 'code', 'Editor')",
+            params![(now - Duration::seconds(7200)).to_rfc3339()],
+        )
+        .unwrap();
+        let session_id = (now - Duration::seconds(7200)).to_rfc3339();
+        meta_set(&db, "session_reset_at", &session_id).unwrap();
+
+        let mut config = Config::default();
+        config.notifications.enabled = true;
+        config.notifications.break_overdue = true;
+        config.breaks.enabled = true;
+        config.breaks.interval_secs = 3600;
+        config.breaks.min_break_secs = 300;
+
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: rec.clone(),
+        };
+
+        run_notification_check(&state).unwrap();
+        run_notification_check(&state).unwrap();
+
+        assert_eq!(rec.call_count(), 1, "break-overdue should fire once per session");
+    }
+
+    #[test]
+    fn break_overdue_notification_refires_after_break() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+
+        let rec = Arc::new(notifications::RecordingNotifier::new());
+        let now = Utc::now();
+
+        db.execute(
+            "INSERT INTO app_intervals(started_at, app_id, window_title)
+             VALUES (?1, 'code', 'Editor')",
+            params![(now - Duration::seconds(28800)).to_rfc3339()],
+        )
+        .unwrap();
+        let old_session_id = (now - Duration::seconds(28800)).to_rfc3339();
+        meta_set(&db, "session_reset_at", &old_session_id).unwrap();
+
+        let mut config = Config::default();
+        config.notifications.enabled = true;
+        config.notifications.break_overdue = true;
+        config.breaks.enabled = true;
+        config.breaks.interval_secs = 3600;
+        config.breaks.min_break_secs = 300;
+
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: rec.clone(),
+        };
+
+        run_notification_check(&state).unwrap();
+        assert_eq!(rec.call_count(), 1);
+
+        let break_time = (now - Duration::seconds(1800)).to_rfc3339();
+        {
+            let db = state.db.lock().unwrap();
+            meta_set(&db, "session_reset_at", &break_time).unwrap();
+            let new_interval_start = (now - Duration::seconds(1740)).to_rfc3339();
+            db.execute(
+                "UPDATE app_intervals SET started_at = ?1",
+                params![new_interval_start],
+            )
+            .unwrap();
+        }
+
+        run_notification_check(&state).unwrap();
+        assert_eq!(rec.call_count(), 1, "no notification while not yet overdue");
+
+        {
+            let db = state.db.lock().unwrap();
+            let new_session_start = (now - Duration::seconds(7200)).to_rfc3339();
+            meta_set(&db, "session_reset_at", &new_session_start).unwrap();
+            let interval_start = (now - Duration::seconds(7500)).to_rfc3339();
+            db.execute(
+                "UPDATE app_intervals SET started_at = ?1",
+                params![interval_start],
+            )
+            .unwrap();
+        }
+
+        run_notification_check(&state).unwrap();
+        assert_eq!(rec.call_count(), 2, "break-overdue should refire after break");
     }
 }

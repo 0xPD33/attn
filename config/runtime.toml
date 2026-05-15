@@ -80,3 +80,8 @@ min_break_secs = 300
 
 [focus_source]
 kind = "auto"   # auto | niri | hyprland | river | sway
+
+[notifications]
+enabled = true
+break_overdue = true
+budget_exceeded = true
