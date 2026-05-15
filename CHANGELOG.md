@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-15
+
+### Added
+- **Settings overlay covers budgets, notifications, and compositor**: the in-popup settings sheet now configures everything except the watch lists. New sections — daily budget per category (minute input + Save), three notification toggles (apply immediately on click), and a focus-source pill picker (auto/niri/Hyprland/river/Sway) with a "restart required" hint. The sheet is now scrollable.
+- **New socket commands and CLI subcommands**: `attn set-budget`, `attn set-notifications`, `attn set-focus-source`. All write `~/.config/attn/config.toml` atomically via `toml_edit` + temp file + rename + mtime check, then trigger an in-process reload (focus-source change requires daemon restart).
+- **Status JSON exposes current settings**: `notifications_enabled`, `notifications_break_overdue`, `notifications_budget_exceeded`, `focus_source_kind` are now in `attn status --json` so the popup can prefill the new controls.
+
+### Fixed
+- **Codex/Claude attribution in multi-window ghostty**: terminal-subprocess resolution now (1) recognizes Claude Code spinner glyphs (✳, braille block) as a Claude marker via a fast-path title check, (2) returns no-match for `tmux …` titles so the tmux-query path takes over, and (3) caches `window_id → resolved subprocess` per session so once a window has been unambiguously identified, future focuses on the same window keep that attribution even if the title temporarily lacks a marker. Cap is 256 entries with FIFO eviction.
+
 ## [0.2.0] - 2026-05-15
 
 ### Added
@@ -81,7 +91,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/0xPD33/attn/releases/tag/v0.2.1
 [0.2.0]: https://github.com/0xPD33/attn/releases/tag/v0.2.0
 [0.1.3]: https://github.com/0xPD33/attn/releases/tag/v0.1.3
 [0.1.2]: https://github.com/0xPD33/attn/releases/tag/v0.1.2
