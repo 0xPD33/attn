@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-15
+
+### Added
+- **Cross-compositor focus tracking**: attn now reads focus events from Niri, Hyprland, Sway, and river. The `focus_source.kind` config field selects an adapter (`auto | niri | hyprland | river | sway`); auto-detect probes `NIRI_SOCKET`, `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, then falls back to a wlr-foreign-toplevel client for river. `attn doctor` reports the active source.
+- **Firefox-family browser reader**: a new `kind = "firefox"` browser reader covers Firefox, Zen, LibreWolf, and Floorp, reading `moz_places` via the same snapshot-copy + focus-clipping pipeline as the Chromium reader.
+- **Daily budget UI**: the Today panel renders per-category daily budget progress. Each category bar segment shows a budget-threshold stripe while under budget and tints (`#d97b6c` blended with the category color) once `seconds >= budget_secs`. Legend shows `12m / 10m` style labels. Configure via `[budgets.<category>] daily_budget_secs = N`.
+- **Desktop notifications**: optional `org.freedesktop.Notifications` callouts for break-overdue (once per overdue session, cleared by a real break) and budget-exceeded (once per category per local day; dedup keyed in the `meta` table). Toggle via `[notifications] enabled = true|false`, with sub-toggles `break_overdue` and `budget_exceeded`. `attn doctor` probes the session bus and reports the notification daemon's presence.
+- **Other drawer + `attn categorize`**: the Today panel grows an expandable "Other" section listing uncategorized apps (≥ 60s) and domains (≥ `display.domains_min_seconds`). Each row has a `+` picker that calls the new `attn categorize --kind=app|domain --id=<id> --category=<name>` CLI, which writes `~/.config/attn/config.toml` atomically (temp-file + rename, with mtime check to reject concurrent edits) and reloads the daemon. Below-threshold items aggregate into a synthetic `(below threshold)` row.
+
+### Changed
+- `attn doctor` output expanded to cover the active focus source, Firefox-family browser DBs, and the desktop-notification probe.
+- README and `scripts/install.sh` no longer assume Niri; the install gate now accepts Niri / Hyprland / Sway / river, and `ATTN_SKIP_NIRI_CHECK` is renamed to `ATTN_SKIP_COMPOSITOR_CHECK` (the old name is kept as a deprecated alias).
+- `ARCHITECTURE.md` revised to describe the new focus-source abstraction, the notification path, and the Firefox-family reader.
+
+### Migration
+
+Existing 0.1.x configs continue to load without changes; new fields default safely. To pick up the new bundled defaults (Firefox browsers, `[focus_source]`, `[notifications]`), run `attn init --merge`.
+
 ## [0.1.3] - 2026-05-14
 
 ### Added
@@ -63,7 +81,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/0xPD33/attn/releases/tag/v0.2.0
 [0.1.3]: https://github.com/0xPD33/attn/releases/tag/v0.1.3
 [0.1.2]: https://github.com/0xPD33/attn/releases/tag/v0.1.2
 [0.1.1]: https://github.com/0xPD33/attn/releases/tag/v0.1.1
