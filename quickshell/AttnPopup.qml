@@ -1785,7 +1785,7 @@ PopupWindow {
                             font.bold: true
                         }
                         Text {
-                            text: "Minutes per day (0 = no limit)"
+                            text: "Click a preset to set or clear a daily budget"
                             color: popup.textDim
                             font.family: popup.fontFamily
                             font.pixelSize: 9
@@ -1793,82 +1793,95 @@ PopupWindow {
 
                         Repeater {
                             model: popup.categories || []
-                            delegate: RowLayout {
+                            delegate: ColumnLayout {
+                                id: catRow
                                 required property var modelData
+                                readonly property int catBudget: (modelData.budget_secs && modelData.budget_secs > 0) ? modelData.budget_secs : 0
                                 Layout.fillWidth: true
-                                spacing: 8
+                                spacing: 4
 
-                                // Colour dot
-                                Rectangle {
-                                    width: 7; height: 7; radius: 3.5
-                                    color: popup.categoryColor(modelData.name)
-                                    Layout.alignment: Qt.AlignVCenter
-                                }
-
-                                Text {
-                                    text: modelData.name
-                                    color: popup.textColor
-                                    font.family: popup.fontFamily
-                                    font.pixelSize: 10
+                                RowLayout {
                                     Layout.fillWidth: true
-                                }
+                                    spacing: 8
 
-                                Rectangle {
-                                    Layout.preferredWidth: 52
-                                    Layout.preferredHeight: 22
-                                    radius: 4
-                                    color: Qt.darker(popup.bgSecondary, 1.3)
-                                    border.width: 1
-                                    border.color: popup.accentColor
+                                    Rectangle {
+                                        width: 7; height: 7; radius: 3.5
+                                        color: popup.categoryColor(catRow.modelData.name)
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
 
-                                    TextInput {
-                                        id: budgetInput
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 6
-                                        anchors.rightMargin: 6
-                                        verticalAlignment: TextInput.AlignVCenter
+                                    Text {
+                                        text: catRow.modelData.name
                                         color: popup.textColor
                                         font.family: popup.fontFamily
                                         font.pixelSize: 10
-                                        inputMethodHints: Qt.ImhDigitsOnly
-                                        // Pre-fill from current budget (budget_secs / 60, rounded)
-                                        text: (modelData.budget_secs && modelData.budget_secs > 0)
-                                              ? String(Math.round(modelData.budget_secs / 60)) : ""
-                                        selectByMouse: true
-                                        validator: IntValidator { bottom: 0; top: 9999 }
+                                        Layout.fillWidth: true
                                     }
-                                }
-
-                                Rectangle {
-                                    Layout.preferredWidth: budgetSaveLabel.implicitWidth + 14
-                                    Layout.preferredHeight: 22
-                                    radius: 11
-                                    color: budgetSaveMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.2) : popup.bgSecondary
-                                    border.width: 1
-                                    border.color: popup.accentColor
-
-                                    Behavior on color { ColorAnimation { duration: 120 } }
 
                                     Text {
-                                        id: budgetSaveLabel
-                                        anchors.centerIn: parent
-                                        text: "Save"
-                                        color: popup.textDim
+                                        text: catRow.catBudget > 0
+                                              ? popup.formatDuration(catRow.catBudget) + "/day"
+                                              : "no limit"
+                                        color: catRow.catBudget > 0 ? popup.watchedAccent : popup.textDim
                                         font.family: popup.fontFamily
                                         font.pixelSize: 9
                                     }
-                                    MouseArea {
-                                        id: budgetSaveMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            var mins = parseInt(budgetInput.text) || 0;
-                                            attnSetBudget.budgetCategory = modelData.name;
-                                            attnSetBudget.budgetSecs = mins * 60;
-                                            attnSetBudget.running = true;
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 15
+                                    spacing: 4
+
+                                    Repeater {
+                                        model: [
+                                            {label: "off",  secs: 0},
+                                            {label: "15m",  secs: 900},
+                                            {label: "30m",  secs: 1800},
+                                            {label: "1h",   secs: 3600},
+                                            {label: "2h",   secs: 7200},
+                                            {label: "4h",   secs: 14400},
+                                            {label: "8h",   secs: 28800},
+                                        ]
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            readonly property bool active: modelData.secs === catRow.catBudget
+                                            width: budgetPillLabel.implicitWidth + 14
+                                            height: 22
+                                            radius: 11
+                                            color: active
+                                                ? popup.watchedBg
+                                                : (budgetPillMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
+                                            border.width: 1
+                                            border.color: active ? popup.watchedAccent : popup.accentColor
+                                            scale: budgetPillMouse.pressed ? 0.94 : 1.0
+
+                                            Behavior on color { ColorAnimation { duration: 140 } }
+                                            Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+
+                                            Text {
+                                                id: budgetPillLabel
+                                                anchors.centerIn: parent
+                                                text: modelData.label
+                                                color: parent.active ? popup.watchedAccent : popup.textDim
+                                                font.family: popup.fontFamily
+                                                font.pixelSize: 10
+                                                font.bold: parent.active
+                                            }
+                                            MouseArea {
+                                                id: budgetPillMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    attnSetBudget.budgetCategory = catRow.modelData.name;
+                                                    attnSetBudget.budgetSecs = modelData.secs;
+                                                    attnSetBudget.running = true;
+                                                }
+                                            }
                                         }
                                     }
+                                    Item { Layout.fillWidth: true }
                                 }
                             }
                         }
