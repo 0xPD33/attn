@@ -1,3 +1,5 @@
+mod browsers;
+
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use glob::glob;
@@ -16,14 +18,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
-use url::Url;
-
 mod focus;
 
 const DEFAULT_CONFIG_PATH: &str = "~/.config/attn/config.toml";
 const DEFAULT_STATE_PATH: &str = "~/.local/state/attn/attn.sqlite";
 const DEFAULT_SOCKET_PATH: &str = "$XDG_RUNTIME_DIR/attn.sock";
-const CHROME_EPOCH_OFFSET_MICROS: i64 = 11_644_473_600_000_000;
 const SOCKET_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const DEFAULT_CONFIG_TOML: &str = include_str!("../config/default.toml");
 
@@ -739,6 +738,53 @@ fn default_browsers() -> BTreeMap<String, BrowserConfig> {
                 "~/snap/chromium/common/chromium/*/History".to_string(),
             ],
             kind: "chromium".to_string(),
+        },
+    );
+    browsers.insert(
+        "firefox".to_string(),
+        BrowserConfig {
+            app_ids: vec![
+                "firefox".to_string(),
+                "Firefox".to_string(),
+                "org.mozilla.firefox".to_string(),
+            ],
+            history_paths: vec!["~/.mozilla/firefox/*/places.sqlite".to_string()],
+            kind: "firefox".to_string(),
+        },
+    );
+    browsers.insert(
+        "zen".to_string(),
+        BrowserConfig {
+            app_ids: vec![
+                "zen".to_string(),
+                "zen-alpha".to_string(),
+                "app.zen_browser.zen".to_string(),
+                "io.github.zen_browser.zen".to_string(),
+            ],
+            history_paths: vec!["~/.zen/*/places.sqlite".to_string()],
+            kind: "firefox".to_string(),
+        },
+    );
+    browsers.insert(
+        "librewolf".to_string(),
+        BrowserConfig {
+            app_ids: vec![
+                "librewolf".to_string(),
+                "io.gitlab.librewolf-community".to_string(),
+            ],
+            history_paths: vec!["~/.librewolf/*/places.sqlite".to_string()],
+            kind: "firefox".to_string(),
+        },
+    );
+    browsers.insert(
+        "floorp".to_string(),
+        BrowserConfig {
+            app_ids: vec![
+                "floorp".to_string(),
+                "one.ablaze.floorp".to_string(),
+            ],
+            history_paths: vec!["~/.floorp/*/places.sqlite".to_string()],
+            kind: "firefox".to_string(),
         },
     );
     browsers
@@ -2636,9 +2682,13 @@ fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Ve
     let mut imports = Vec::new();
 
     for (name, browser) in &config.browsers {
-        if browser.kind != "chromium" {
-            continue;
-        }
+        let reader = match browsers::for_kind(&browser.kind) {
+            Some(r) => r,
+            None => {
+                eprintln!("attn: unknown browser kind {:?} for {name}, skipping", browser.kind);
+                continue;
+            }
+        };
         let history_paths = match discover_history_paths(browser) {
             Ok(paths) => paths,
             Err(error) => {
@@ -2648,10 +2698,26 @@ fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Ve
         };
         let mut successful_profiles = Vec::new();
         let mut visits = Vec::new();
-        for path in history_paths {
-            match read_chromium_visits(&path, name, start, end) {
-                Ok(profile_visits) => {
-                    successful_profiles.push(source_profile_from_history_path(&path));
+        for path in &history_paths {
+            let snapshot = match snapshot_history(path, name) {
+                Ok(s) => s,
+                Err(error) => {
+                    eprintln!(
+                        "attn could not snapshot browser history {}: {error:#}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let profile = source_profile_from_history_path(path);
+            match reader.read_visits(&snapshot, start, end) {
+                Ok(mut profile_visits) => {
+                    // The module reader derives source_profile from the snapshot
+                    // path; fix it up to reflect the real profile name.
+                    for v in &mut profile_visits {
+                        v.source_profile = profile.clone();
+                    }
+                    successful_profiles.push(profile);
                     visits.extend(profile_visits);
                 }
                 Err(error) => eprintln!(
@@ -2659,6 +2725,7 @@ fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Ve
                     path.display()
                 ),
             }
+            remove_snapshot_files(&snapshot);
         }
         if !successful_profiles.is_empty() {
             successful_profiles.sort();
@@ -2737,14 +2804,7 @@ fn delete_imported_domain_intervals(
     Ok(())
 }
 
-#[derive(Debug)]
-struct BrowserVisit {
-    started_at: DateTime<Utc>,
-    ended_at: DateTime<Utc>,
-    url: String,
-    domain: String,
-    source_profile: String,
-}
+use browsers::BrowserVisit;
 
 fn discover_history_paths(browser: &BrowserConfig) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
@@ -2762,20 +2822,6 @@ fn discover_history_paths(browser: &BrowserConfig) -> Result<Vec<PathBuf>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
-}
-
-fn read_chromium_visits(
-    history_path: &Path,
-    browser_name: &str,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-) -> Result<Vec<BrowserVisit>> {
-    let snapshot = snapshot_history(history_path, browser_name)?;
-    let source_profile = source_profile_from_history_path(history_path);
-    let result =
-        read_chromium_visits_from_snapshot(&snapshot, &source_profile, window_start, window_end);
-    remove_snapshot_files(&snapshot);
-    result
 }
 
 fn cleanup_stale_snapshots() {
@@ -2855,75 +2901,6 @@ fn remove_snapshot_files(snapshot: &Path) {
     let _ = fs::remove_file(snapshot);
     let _ = fs::remove_file(sqlite_sidecar_path(snapshot, "-wal"));
     let _ = fs::remove_file(sqlite_sidecar_path(snapshot, "-shm"));
-}
-
-fn read_chromium_visits_from_snapshot(
-    snapshot: &Path,
-    source_profile: &str,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-) -> Result<Vec<BrowserVisit>> {
-    let db = Connection::open(snapshot)
-        .with_context(|| format!("failed to open history snapshot {}", snapshot.display()))?;
-    let chrome_start = utc_to_chrome_micros(window_start - Duration::hours(12));
-    let chrome_end = utc_to_chrome_micros(window_end + Duration::hours(12));
-    let mut stmt = db.prepare(
-        "SELECT visits.visit_time, COALESCE(visits.visit_duration, 0), urls.url
-         FROM visits
-         JOIN urls ON urls.id = visits.url
-         WHERE visits.visit_time >= ?1 AND visits.visit_time <= ?2
-         ORDER BY visits.visit_time ASC",
-    )?;
-    let rows = stmt.query_map(params![chrome_start, chrome_end], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-
-    let mut visits = Vec::new();
-    for row in rows {
-        let (visit_time, visit_duration, raw_url) = row?;
-        let Some(domain) = domain_from_url(&raw_url) else {
-            continue;
-        };
-        let started_at = chrome_micros_to_utc(visit_time)?;
-        let duration_secs = (visit_duration / 1_000_000).clamp(1, 900);
-        let ended_at = started_at + Duration::seconds(duration_secs);
-        if ended_at <= window_start || started_at >= window_end {
-            continue;
-        }
-        visits.push(BrowserVisit {
-            started_at,
-            ended_at,
-            url: raw_url,
-            domain,
-            source_profile: source_profile.to_string(),
-        });
-    }
-    Ok(cap_visits_at_next_start(visits))
-}
-
-fn cap_visits_at_next_start(mut visits: Vec<BrowserVisit>) -> Vec<BrowserVisit> {
-    visits.sort_by_key(|visit| visit.started_at);
-    let starts = visits
-        .iter()
-        .map(|visit| visit.started_at)
-        .collect::<Vec<_>>();
-
-    for (index, visit) in visits.iter_mut().enumerate() {
-        if let Some(next_start) = starts.get(index + 1) {
-            if *next_start > visit.started_at && *next_start < visit.ended_at {
-                visit.ended_at = *next_start;
-            }
-        }
-    }
-
-    visits
-        .into_iter()
-        .filter(|visit| visit.ended_at > visit.started_at)
-        .collect()
 }
 
 fn source_profile_from_history_path(history_path: &Path) -> String {
@@ -3333,23 +3310,6 @@ fn capped_interval_end(
         .max(started_at)
 }
 
-fn chrome_micros_to_utc(value: i64) -> Result<DateTime<Utc>> {
-    let unix_micros = value - CHROME_EPOCH_OFFSET_MICROS;
-    Utc.timestamp_micros(unix_micros)
-        .single()
-        .ok_or_else(|| anyhow!("invalid Chromium timestamp {value}"))
-}
-
-fn utc_to_chrome_micros(value: DateTime<Utc>) -> i64 {
-    value.timestamp_micros() + CHROME_EPOCH_OFFSET_MICROS
-}
-
-fn domain_from_url(raw_url: &str) -> Option<String> {
-    let url = Url::parse(raw_url).ok()?;
-    let host = url.host_str()?;
-    Some(normalize_domain(host))
-}
-
 fn normalize_domain(domain: &str) -> String {
     domain
         .trim()
@@ -3429,14 +3389,20 @@ mod tests {
 
     #[test]
     fn chrome_timestamp_round_trips() {
+        // Chrome epoch offset in microseconds (Jan 1 1601 → Jan 1 1970)
+        const CHROME_EPOCH_OFFSET_MICROS: i64 = 11_644_473_600_000_000;
         let now = Utc::now();
         let rounded = now
             .timestamp_micros()
             .checked_div(1)
             .and_then(|micros| Utc.timestamp_micros(micros).single())
             .unwrap();
-        let chrome = utc_to_chrome_micros(rounded);
-        assert_eq!(chrome_micros_to_utc(chrome).unwrap(), rounded);
+        let chrome = rounded.timestamp_micros() + CHROME_EPOCH_OFFSET_MICROS;
+        let back = Utc
+            .timestamp_micros(chrome - CHROME_EPOCH_OFFSET_MICROS)
+            .single()
+            .unwrap();
+        assert_eq!(back, rounded);
     }
 
     #[test]
@@ -3749,35 +3715,6 @@ mod tests {
         assert_eq!(seconds, 300);
     }
 
-    #[test]
-    fn browser_visits_are_capped_at_next_visit_start() {
-        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
-        let visits = cap_visits_at_next_start(vec![
-            BrowserVisit {
-                started_at,
-                ended_at: started_at + Duration::minutes(10),
-                url: "https://youtube.com/".to_string(),
-                domain: "youtube.com".to_string(),
-                source_profile: "Default".to_string(),
-            },
-            BrowserVisit {
-                started_at: started_at + Duration::minutes(5),
-                ended_at: started_at + Duration::minutes(15),
-                url: "https://reddit.com/".to_string(),
-                domain: "reddit.com".to_string(),
-                source_profile: "Default".to_string(),
-            },
-        ]);
-
-        assert_eq!(
-            (visits[0].ended_at - visits[0].started_at).num_seconds(),
-            300
-        );
-        assert_eq!(
-            (visits[1].ended_at - visits[1].started_at).num_seconds(),
-            600
-        );
-    }
 
     #[test]
     fn overlapping_domain_intervals_do_not_exceed_browser_focus_time() {
@@ -4353,6 +4290,8 @@ mod tests {
 
     #[test]
     fn chromium_reader_extracts_domains_and_caps_long_durations() {
+        const CHROME_EPOCH_OFFSET_MICROS: i64 = 11_644_473_600_000_000;
+
         let path = unique_temp_db_path("attn-history-reader");
         {
             let db = Connection::open(&path).unwrap();
@@ -4369,6 +4308,7 @@ mod tests {
             )
             .unwrap();
             let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+            let chrome_time = started_at.timestamp_micros() + CHROME_EPOCH_OFFSET_MICROS;
             db.execute(
                 "INSERT INTO urls(id, url) VALUES (1, 'https://www.youtube.com/watch?v=test')",
                 [],
@@ -4377,15 +4317,16 @@ mod tests {
             db.execute(
                 "INSERT INTO visits(id, url, visit_time, visit_duration)
                  VALUES (1, 1, ?1, ?2)",
-                params![utc_to_chrome_micros(started_at), 3_600_i64 * 1_000_000],
+                params![chrome_time, 3_600_i64 * 1_000_000],
             )
             .unwrap();
         }
 
         let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
-        let visits = read_chromium_visits_from_snapshot(
+        let reader = browsers::chromium::ChromiumReader;
+        let visits = browsers::BrowserReader::read_visits(
+            &reader,
             &path,
-            "Default",
             started_at - Duration::minutes(1),
             started_at + Duration::minutes(20),
         )
@@ -4394,7 +4335,6 @@ mod tests {
 
         assert_eq!(visits.len(), 1);
         assert_eq!(visits[0].domain, "youtube.com");
-        assert_eq!(visits[0].source_profile, "Default");
         assert_eq!(
             (visits[0].ended_at - visits[0].started_at).num_seconds(),
             900

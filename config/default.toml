@@ -47,6 +47,26 @@ history_paths = [
 ]
 kind = "chromium"
 
+[browsers.firefox]
+app_ids = ["firefox", "Firefox", "org.mozilla.firefox"]
+history_paths = ["~/.mozilla/firefox/*/places.sqlite"]
+kind = "firefox"
+
+[browsers.zen]
+app_ids = ["zen", "zen-alpha", "app.zen_browser.zen", "io.github.zen_browser.zen"]
+history_paths = ["~/.zen/*/places.sqlite"]
+kind = "firefox"
+
+[browsers.librewolf]
+app_ids = ["librewolf", "io.gitlab.librewolf-community"]
+history_paths = ["~/.librewolf/*/places.sqlite"]
+kind = "firefox"
+
+[browsers.floorp]
+app_ids = ["floorp", "one.ablaze.floorp"]
+history_paths = ["~/.floorp/*/places.sqlite"]
+kind = "firefox"
+
 [terminals]
 poll_secs = 10
 [terminals.apps]
