@@ -1,10 +1,10 @@
 # attn
 
-A local attention ledger for [Niri](https://github.com/YaLTeR/niri) and [Quickshell](https://quickshell.org/).
+A local attention ledger for Wayland (Niri, Hyprland, Sway, river) and [Quickshell](https://quickshell.org/).
 
-`attn` measures where focus actually goes across applications, and, for Chromium-family browsers, which domains receive that browser time. It's intentionally observational: no blocking, no notifications, no streaks. It records local evidence and surfaces a discreet indicator in your bar.
+`attn` measures where focus actually goes across applications, and which domains receive browser time (Chromium-family and Firefox-family). It's intentionally observational: no blocking, no streaks. It records local evidence, surfaces a discreet indicator in your bar, and optionally pings a desktop notification when a break is overdue or a daily budget is reached.
 
-> **Status:** V1, single-user, NixOS + Niri + Quickshell. The Rust daemon and CLI build on any Linux with `/proc`; the Quickshell widget is the only Niri-coupled piece.
+> **Status:** V1, single-user, NixOS-tested with Niri + Quickshell, also runs on Hyprland, Sway, and river via the `focus_source.kind` config. The Rust daemon and CLI build on any Linux with `/proc`; the Quickshell widget is the optional UI layer.
 
 ![attn popup - Today view](docs/screenshots/popup-today.png)
 
@@ -15,9 +15,9 @@ A local attention ledger for [Niri](https://github.com/YaLTeR/niri) and [Quicksh
 
 ## What it tracks
 
-- **App focus time** from Niri IPC events.
+- **App focus time** from your compositor's IPC (Niri, Hyprland, Sway, river — auto-detected, overridable via `focus_source.kind`).
 - **Terminal subprocess**. If you're in `ghostty` and run `claude`, the daemon attributes time to `claude`, not `ghostty`. Detection uses (1) window title, (2) live tmux query if tmux is in the descendant tree, (3) a `/proc` descendant walk with start-time tiebreak.
-- **Browser domain time** for Helium, Brave, Chrome, and Chromium, clipped to intervals where that browser actually had focus. Domain time can never grow while the browser is unfocused.
+- **Browser domain time** for Chromium-family (Helium, Brave, Chrome, Chromium) and Firefox-family (Firefox, Zen, LibreWolf, Floorp) browsers, clipped to intervals where that browser actually had focus. Domain time can never grow while the browser is unfocused.
 - **Idle handling**. A focused interval that doesn't change for 5 minutes is capped, so an unattended tab doesn't inflate today's total.
 
 ## What it doesn't do
@@ -32,7 +32,7 @@ All state is local. The SQLite ledger lives at `~/.local/state/attn/attn.sqlite`
 
 ### One-line installer (Linux, x86_64 or aarch64)
 
-Requires [niri](https://github.com/YaLTeR/niri) running (attn reads focus events from `niri msg -j event-stream`). Without niri, app tracking won't do anything.
+Requires a supported Wayland compositor running: [niri](https://github.com/YaLTeR/niri), [Hyprland](https://hyprland.org/), [Sway](https://swaywm.org/), or [river](https://codeberg.org/river/river). Without one, app tracking won't do anything.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/0xPD33/attn/main/scripts/install.sh | sh
@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/0xPD33/attn/main/scripts/install.sh
 
 What it does: fetches the latest GitHub Release tarball, verifies its sha256, places the `attn` binary at `~/.local/bin/attn`, runs `attn init` or `attn init --merge` for the config, and drops a systemd user unit at `~/.config/systemd/user/attn.service`. It does **not** enable or start the service unless you set `ATTN_START=1`.
 
-Environment overrides: `ATTN_VERSION=v0.1.0` to pin a tag, `ATTN_PREFIX=$HOME/bin` for a different install dir, `ATTN_SYSTEMD=0` to skip the systemd unit, `ATTN_START=1` to enable + start the service immediately, `ATTN_SKIP_NIRI_CHECK=1` to install without niri.
+Environment overrides: `ATTN_VERSION=v0.1.0` to pin a tag, `ATTN_PREFIX=$HOME/bin` for a different install dir, `ATTN_SYSTEMD=0` to skip the systemd unit, `ATTN_START=1` to enable + start the service immediately, `ATTN_SKIP_COMPOSITOR_CHECK=1` to install without a supported compositor.
 
 Verify the binary:
 
@@ -172,7 +172,7 @@ attn status --json       print current-day status as JSON (used by Quickshell)
 attn reload              reload ~/.config/attn/config.toml without restarting
 attn init [--merge|--force]
                          write or update the default config
-attn doctor              check niri IPC, config parsing, state DB, browser DBs, socket
+attn doctor              check compositor IPC, config parsing, state DB, browser DBs, socket
 ```
 
 Example `status` output:

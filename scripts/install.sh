@@ -10,7 +10,8 @@
 #   ATTN_PREFIX     binary install dir. Default: $HOME/.local/bin
 #   ATTN_SYSTEMD    set to 0 to skip writing the user service. Default: 1
 #   ATTN_START      set to 1 to enable + start the service. Default: 0
-#   ATTN_SKIP_NIRI_CHECK   set to 1 to install even without niri (not recommended)
+#   ATTN_SKIP_COMPOSITOR_CHECK   set to 1 to install even without a supported compositor (not recommended)
+#   ATTN_SKIP_NIRI_CHECK         deprecated alias for ATTN_SKIP_COMPOSITOR_CHECK
 
 set -eu
 
@@ -18,6 +19,7 @@ ATTN_REPO="${ATTN_REPO:-0xPD33/attn}"
 ATTN_PREFIX="${ATTN_PREFIX:-$HOME/.local/bin}"
 ATTN_SYSTEMD="${ATTN_SYSTEMD:-1}"
 ATTN_START="${ATTN_START:-0}"
+ATTN_SKIP_COMPOSITOR_CHECK="${ATTN_SKIP_COMPOSITOR_CHECK:-0}"
 ATTN_SKIP_NIRI_CHECK="${ATTN_SKIP_NIRI_CHECK:-0}"
 
 red()    { printf '\033[31m%s\033[0m\n' "$1" >&2; }
@@ -38,11 +40,14 @@ case "$(uname -s)" in
   *)     red "attn currently only supports Linux."; exit 1 ;;
 esac
 
-if [ "$ATTN_SKIP_NIRI_CHECK" != "1" ]; then
-  if ! command -v niri >/dev/null 2>&1; then
-    red "attn requires the niri Wayland compositor (https://github.com/YaLTeR/niri)."
-    yellow "Daemon reads focus events from 'niri msg -j event-stream'. Without niri, app tracking does nothing."
-    yellow "Set ATTN_SKIP_NIRI_CHECK=1 to install anyway (e.g. on a build host)."
+if [ "$ATTN_SKIP_COMPOSITOR_CHECK" != "1" ] && [ "$ATTN_SKIP_NIRI_CHECK" != "1" ]; then
+  if ! command -v niri >/dev/null 2>&1 \
+     && [ -z "$HYPRLAND_INSTANCE_SIGNATURE" ] \
+     && [ -z "$SWAYSOCK" ] \
+     && ! command -v river >/dev/null 2>&1; then
+    red "attn needs a supported Wayland compositor (niri, Hyprland, Sway, or river)."
+    yellow "Focus tracking subscribes to the compositor's IPC. Without one, app tracking does nothing."
+    yellow "Set ATTN_SKIP_COMPOSITOR_CHECK=1 to install anyway (e.g. on a build host)."
     exit 1
   fi
 fi
@@ -154,7 +159,7 @@ info ""
 green "done."
 info ""
 info "next steps:"
-info "  1. make sure niri is running (attn subscribes to its event-stream)."
+info "  1. make sure your compositor (niri / Hyprland / Sway / river) is running."
 info "  2. edit your config:  \$EDITOR $CONFIG_PATH"
 info "  3. check status:      attn status --json | jq ."
 info "  4. inspect health:    attn doctor"
