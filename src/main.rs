@@ -1016,6 +1016,9 @@ struct AppState {
     /// Set once at daemon startup and never changes.
     focus_source_kind: Arc<String>,
     notifier: Arc<dyn notifications::NotificationSink>,
+    /// Per-window terminal subprocess resolution cache.
+    /// Maps window_id → resolved subprocess name.  Session-scoped, not persisted.
+    terminal_window_cache: Arc<Mutex<TerminalWindowCache>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1107,6 +1110,7 @@ fn run_daemon() -> Result<()> {
         tracking_state: Arc::new(Mutex::new(initial_pause)),
         focus_source_kind: Arc::new(resolved_kind),
         notifier,
+        terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
     };
     install_shutdown_handler(state.clone())?;
     let listener = bind_socket(&config.socket_path)?;
@@ -1289,7 +1293,7 @@ impl IdleClient {
         drop(db);
         if let Ok(Some(window)) = query_focused_window(&self.state) {
             let config = self.state.config.lock().unwrap().clone();
-            let resolved = resolve_focused_window(window, &config);
+            let resolved = resolve_focused_window(window, &config, &self.state.terminal_window_cache);
             let db = self.state.db.lock().unwrap();
             if let Err(e) = open_app_interval(&db, now, &resolved) {
                 eprintln!("attn idle: reopen interval failed: {e:#}");
@@ -1865,7 +1869,7 @@ fn clear_pause(state: &AppState) -> Result<PauseResponse> {
     drop(db);
     if let Ok(Some(window)) = query_focused_window(state) {
         let config = state.config.lock().unwrap().clone();
-        let resolved = resolve_focused_window(window, &config);
+        let resolved = resolve_focused_window(window, &config, &state.terminal_window_cache);
         let db = state.db.lock().unwrap();
         open_app_interval(&db, now, &resolved)?;
     }
@@ -1933,7 +1937,7 @@ fn run_focus_dispatch(state: AppState) -> Result<()> {
     if !paused {
         if let Some(window) = source.poll_current()? {
             let config = state.config.lock().unwrap().clone();
-            let resolved = resolve_focused_window(window, &config);
+            let resolved = resolve_focused_window(window, &config, &state.terminal_window_cache);
             open_app_interval(&state.db.lock().unwrap(), Utc::now(), &resolved)?;
         }
     }
@@ -1973,7 +1977,7 @@ fn handle_focus_change_with(state: &AppState, current_window: Option<focus::Focu
         return Ok(());
     }
 
-    let current = current_window.map(|w| resolve_focused_window(w, &config));
+    let current = current_window.map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
     match (open, current) {
         (Some(open), Some(window)) if open.matches(&window) => {}
         (Some(_), Some(window)) => {
@@ -2020,14 +2024,76 @@ impl OpenAppInterval {
     }
 }
 
-fn resolve_focused_window(mut window: FocusedWindow, config: &Config) -> FocusedWindow {
+/// Maximum number of entries kept in the per-window resolution cache.
+const TERMINAL_CACHE_CAP: usize = 256;
+
+/// Session-scoped cache mapping `window_id → resolved subprocess name`.
+/// Keyed by niri window id (or equivalent); retains insertion order for eviction.
+struct TerminalWindowCache {
+    map: HashMap<i64, String>,
+    order: std::collections::VecDeque<i64>,
+}
+
+impl TerminalWindowCache {
+    fn new() -> Self {
+        Self { map: HashMap::new(), order: std::collections::VecDeque::new() }
+    }
+
+    fn get(&self, window_id: i64) -> Option<&str> {
+        self.map.get(&window_id).map(|s| s.as_str())
+    }
+
+    fn insert(&mut self, window_id: i64, name: String) {
+        if self.map.contains_key(&window_id) {
+            // Update value without reordering.
+            self.map.insert(window_id, name);
+            return;
+        }
+        if self.order.len() >= TERMINAL_CACHE_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.order.push_back(window_id);
+        self.map.insert(window_id, name);
+    }
+
+    #[allow(dead_code)]
+    fn invalidate(&mut self, window_id: i64) {
+        if self.map.remove(&window_id).is_some() {
+            self.order.retain(|id| *id != window_id);
+        }
+    }
+}
+
+fn resolve_focused_window(
+    mut window: FocusedWindow,
+    config: &Config,
+    cache: &Mutex<TerminalWindowCache>,
+) -> FocusedWindow {
     if !config.is_terminal_app(&window.app_id) {
         return window;
     }
+
+    // Unambiguous title-match (spinner / status markers).
     if let Some(name) = match_terminal_program_in_title(&window.title, config) {
+        // Record in cache if we have a window id.
+        if let Some(wid) = window.window_id {
+            cache.lock().unwrap().insert(wid, name.clone());
+        }
         window.app_id = name;
         return window;
     }
+
+    // Cache lookup for ambiguous titles.
+    if let Some(wid) = window.window_id {
+        if let Some(cached) = cache.lock().unwrap().get(wid).map(|s| s.to_owned()) {
+            window.app_id = cached;
+            return window;
+        }
+    }
+
+    // Fall through to /proc walk.
     let Some(pid) = window.pid else { return window; };
     let descendants = collect_proc_descendants(pid);
     let descendant_pids: HashSet<i32> = descendants.iter().map(|d| d.pid).collect();
@@ -2093,10 +2159,42 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
     best.map(|(_, name)| name)
 }
 
+/// Braille spinner chars used by Claude Code, plus common status markers.
+/// U+2800..U+28FF (braille), ✳ U+2733, ⏵ U+23F5, ✶ U+2736.
+const CLAUDE_TITLE_MARKERS: &[char] = &[
+    '✳', '⏵', '✶',
+    // Braille spinners
+    '⠂', '⠐', '⠏', '⠦', '⠹', '⠼', '⠴', '⠧', '⠇', '⠋', '⠙', '⠸', '⠨',
+    '⢿', '⣷', '⣯', '⣟', '⡿', '⣻', '⣽', '⣾',
+];
+
+/// Return the config name mapped to "claude" if present, otherwise "claude".
+fn resolve_claude_name(config: &Config) -> String {
+    for names in config.terminals.apps.values() {
+        for n in names {
+            if normalize_id(n) == "claude" {
+                return normalize_id(n);
+            }
+        }
+    }
+    "claude".to_string()
+}
+
 fn match_terminal_program_in_title(title: &str, config: &Config) -> Option<String> {
     if title.is_empty() {
         return None;
     }
+
+    // Fast path: tmux titles — let the tmux subprocess query handle these.
+    if title.starts_with("tmux ") {
+        return None;
+    }
+
+    // Unambiguous: title contains a Claude Code spinner / status marker.
+    if title.chars().any(|c| CLAUDE_TITLE_MARKERS.contains(&c)) {
+        return Some(resolve_claude_name(config));
+    }
+
     let lowered = title.to_ascii_lowercase();
     let mut best: Option<(usize, String)> = None;
     for names in config.terminals.apps.values() {
@@ -3903,6 +4001,108 @@ mod tests {
     }
 
     #[test]
+    fn title_match_spinner_resolves_to_claude() {
+        let config = Config::default();
+        // Braille spinner character
+        assert_eq!(
+            match_terminal_program_in_title("⠏ attn — src/main.rs", &config),
+            Some("claude".to_string())
+        );
+        // ✳ status marker
+        assert_eq!(
+            match_terminal_program_in_title("✳ some-project", &config),
+            Some("claude".to_string())
+        );
+        // ⏵ play marker
+        assert_eq!(
+            match_terminal_program_in_title("⏵ running", &config),
+            Some("claude".to_string())
+        );
+        // Wider braille block
+        assert_eq!(
+            match_terminal_program_in_title("⣾ compiling", &config),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn title_match_tmux_returns_none() {
+        let config = Config::default();
+        assert_eq!(
+            match_terminal_program_in_title("tmux attach -t empyreal", &config),
+            None
+        );
+        assert_eq!(
+            match_terminal_program_in_title("tmux new-session -s work", &config),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_cache_hit_returns_cached_value() {
+        let config = Config::default();
+        let cache = Mutex::new(TerminalWindowCache::new());
+        // Pre-populate: window 5 → "codex"
+        cache.lock().unwrap().insert(5, "codex".to_string());
+
+        // Ambiguous title (no marker, no word match) — should hit cache.
+        let window = FocusedWindow {
+            window_id: Some(5),
+            app_id: "com.mitchellh.ghostty".to_string(),
+            title: "flashscribe".to_string(), // no program marker
+            pid: None, // no pid → /proc walk skipped
+        };
+        let resolved = resolve_focused_window(window, &config, &cache);
+        assert_eq!(resolved.app_id, "codex");
+    }
+
+    #[test]
+    fn terminal_cache_miss_falls_through() {
+        let config = Config::default();
+        let cache = Mutex::new(TerminalWindowCache::new());
+        // No cache entry for window 99.
+        let window = FocusedWindow {
+            window_id: Some(99),
+            app_id: "com.mitchellh.ghostty".to_string(),
+            title: "some-project".to_string(),
+            pid: None, // no pid so /proc walk also skips
+        };
+        let resolved = resolve_focused_window(window, &config, &cache);
+        // Falls through to unresolved — app_id unchanged.
+        assert_eq!(resolved.app_id, "com.mitchellh.ghostty");
+    }
+
+    #[test]
+    fn terminal_cache_evicts_oldest_at_cap() {
+        let mut cache = TerminalWindowCache::new();
+        for i in 0..TERMINAL_CACHE_CAP {
+            cache.insert(i as i64, format!("app{i}"));
+        }
+        assert_eq!(cache.map.len(), TERMINAL_CACHE_CAP);
+        // Insert one more — should evict window 0.
+        cache.insert(999, "newcomer".to_string());
+        assert_eq!(cache.map.len(), TERMINAL_CACHE_CAP);
+        assert!(cache.get(0).is_none(), "oldest entry should be evicted");
+        assert_eq!(cache.get(999), Some("newcomer"));
+    }
+
+    #[test]
+    fn terminal_cache_unambiguous_title_updates_cache() {
+        let config = Config::default();
+        let cache = Mutex::new(TerminalWindowCache::new());
+        // Title with spinner — unambiguous → should populate cache.
+        let window = FocusedWindow {
+            window_id: Some(42),
+            app_id: "com.mitchellh.ghostty".to_string(),
+            title: "⠹ working on attn".to_string(),
+            pid: None,
+        };
+        let resolved = resolve_focused_window(window, &config, &cache);
+        assert_eq!(resolved.app_id, "claude");
+        assert_eq!(cache.lock().unwrap().get(42), Some("claude"));
+    }
+
+    #[test]
     fn category_for_app_falls_back_to_terminal_apps() {
         let config = Config::default();
         assert_eq!(config.category_for_app("claude"), Some("ai".to_string()));
@@ -3920,31 +4120,34 @@ mod tests {
     #[test]
     fn resolve_focused_window_rewrites_terminal_app_id() {
         let config = Config::default();
+        let cache = Mutex::new(TerminalWindowCache::new());
         let titled = FocusedWindow {
             window_id: Some(7),
             app_id: "com.mitchellh.ghostty".to_string(),
             title: "claude".to_string(),
             pid: None,
         };
-        let resolved = resolve_focused_window(titled, &config);
+        let resolved = resolve_focused_window(titled, &config, &cache);
         assert_eq!(resolved.app_id, "claude");
 
+        // Different window id — no cache entry, tmux title falls through to /proc walk
+        // (which skips because pid is None), leaving app_id unchanged.
         let untitled = FocusedWindow {
-            window_id: Some(7),
+            window_id: Some(8),
             app_id: "com.mitchellh.ghostty".to_string(),
             title: "tmux attach -t empyreal".to_string(),
             pid: None,
         };
-        let resolved = resolve_focused_window(untitled, &config);
+        let resolved = resolve_focused_window(untitled, &config, &cache);
         assert_eq!(resolved.app_id, "com.mitchellh.ghostty");
 
         let non_terminal = FocusedWindow {
-            window_id: Some(7),
+            window_id: Some(9),
             app_id: "brave".to_string(),
             title: "x".to_string(),
             pid: Some(1234),
         };
-        let resolved = resolve_focused_window(non_terminal, &config);
+        let resolved = resolve_focused_window(non_terminal, &config, &cache);
         assert_eq!(resolved.app_id, "brave");
     }
 
@@ -4491,6 +4694,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         swap_state_db_for_reload(&state, &old_config, &new_config, now).unwrap();
@@ -4539,6 +4743,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         let browser = BrowserConfig {
@@ -4640,6 +4845,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
         let (client, server) = UnixStream::pair().unwrap();
         drop(client);
@@ -4667,6 +4873,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(Some(idle_pause))),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         let response = set_pause(&state, PauseReason::Manual).unwrap();
@@ -4970,6 +5177,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: rec.clone(),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         for _ in 0..100 {
@@ -5012,6 +5220,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: rec.clone(),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         run_notification_check(&state).unwrap();
@@ -5053,6 +5262,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: rec.clone(),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
 
         run_notification_check(&state).unwrap();
@@ -5184,6 +5394,7 @@ mod tests {
             tracking_state: Arc::new(Mutex::new(None)),
             focus_source_kind: Arc::new("niri".to_string()),
             notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
         let req = CategorizeRequest {
             kind: CategorizeKind::App,
