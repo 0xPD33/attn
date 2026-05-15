@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use glob::glob;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -11,12 +11,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 use url::Url;
+
+mod focus;
 
 const DEFAULT_CONFIG_PATH: &str = "~/.config/attn/config.toml";
 const DEFAULT_STATE_PATH: &str = "~/.local/state/attn/attn.sqlite";
@@ -168,6 +170,8 @@ struct Config {
     terminals: TerminalsConfig,
     #[serde(default)]
     breaks: BreaksConfig,
+    #[serde(default)]
+    focus_source: FocusSourceConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -193,6 +197,22 @@ impl Default for BreaksConfig {
 fn default_breaks_enabled() -> bool { true }
 fn default_breaks_interval_secs() -> i64 { 3600 }
 fn default_breaks_min_break_secs() -> i64 { 300 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct FocusSourceConfig {
+    #[serde(default = "default_focus_source_kind")]
+    kind: String,
+}
+
+impl Default for FocusSourceConfig {
+    fn default() -> Self {
+        Self { kind: default_focus_source_kind() }
+    }
+}
+
+fn default_focus_source_kind() -> String {
+    "auto".to_string()
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TerminalsConfig {
@@ -783,6 +803,7 @@ impl Config {
         self.display = user.display;
         self.budgets = user.budgets;
         self.breaks = user.breaks;
+        self.focus_source = user.focus_source;
 
         for (name, browser) in user.browsers {
             self.browsers.insert(name, browser);
@@ -887,6 +908,9 @@ struct AppState {
     socket_path: Arc<Mutex<PathBuf>>,
     last_rebuild: Arc<Mutex<Option<Instant>>>,
     tracking_state: Arc<Mutex<Option<PauseInfo>>>,
+    /// Resolved focus source kind (e.g. "niri", "hyprland", "sway", "river").
+    /// Set once at daemon startup and never changes.
+    focus_source_kind: Arc<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -956,6 +980,13 @@ fn run_daemon() -> Result<()> {
     close_stale_open_intervals(&db, now, config.idle_after_secs)?;
     load_breaks_override(&db, &mut config.breaks)?;
 
+    // Resolve focus source kind once at startup.
+    let resolved_kind = if config.focus_source.kind == "auto" {
+        focus::auto_detect().to_string()
+    } else {
+        config.focus_source.kind.clone()
+    };
+
     let initial_pause = load_pause_state(&db)?;
     let state = AppState {
         config: Arc::new(Mutex::new(config.clone())),
@@ -964,6 +995,7 @@ fn run_daemon() -> Result<()> {
         socket_path: Arc::new(Mutex::new(config.socket_path.clone())),
         last_rebuild: Arc::new(Mutex::new(None)),
         tracking_state: Arc::new(Mutex::new(initial_pause)),
+        focus_source_kind: Arc::new(resolved_kind),
     };
     install_shutdown_handler(state.clone())?;
     let listener = bind_socket(&config.socket_path)?;
@@ -1000,7 +1032,8 @@ fn run_daemon() -> Result<()> {
             .map(|config| config.terminals.poll_secs.max(1))
             .unwrap_or(default_terminal_poll_secs());
         thread::sleep(StdDuration::from_secs(poll_secs));
-        if let Err(error) = handle_focus_change(&terminal_state) {
+        let window = query_focused_window(&terminal_state).ok().flatten();
+        if let Err(error) = handle_focus_change_with(&terminal_state, window) {
             eprintln!("attn terminal poll error: {error:#}");
         }
     });
@@ -1035,7 +1068,7 @@ fn run_daemon() -> Result<()> {
         thread::sleep(StdDuration::from_secs(5));
     });
 
-    run_focus_loop(state)
+    run_focus_dispatch(state)
 }
 
 fn run_wayland_idle_listener(state: &AppState) -> Result<()> {
@@ -1135,7 +1168,7 @@ impl IdleClient {
         }
         *current = None;
         drop(db);
-        if let Ok(Some(window)) = query_focused_window() {
+        if let Ok(Some(window)) = query_focused_window(&self.state) {
             let config = self.state.config.lock().unwrap().clone();
             let resolved = resolve_focused_window(window, &config);
             let db = self.state.db.lock().unwrap();
@@ -1568,7 +1601,7 @@ fn clear_pause(state: &AppState) -> Result<PauseResponse> {
     meta_set(&db, "session_reset_at", &now.to_rfc3339())?;
     *current = None;
     drop(db);
-    if let Ok(Some(window)) = query_focused_window() {
+    if let Ok(Some(window)) = query_focused_window(state) {
         let config = state.config.lock().unwrap().clone();
         let resolved = resolve_focused_window(window, &config);
         let db = state.db.lock().unwrap();
@@ -1590,7 +1623,7 @@ fn reload_daemon_config(state: &AppState) -> Result<ReloadResponse> {
     if state_reopened {
         let now = Utc::now();
         swap_state_db_for_reload(state, &old_config, &new_config, now)?;
-        if let Ok(Some(window)) = query_focused_window() {
+        if let Ok(Some(window)) = query_focused_window(state) {
             let db = state.db.lock().unwrap();
             open_app_interval(&db, Utc::now(), &window)?;
         }
@@ -1626,88 +1659,45 @@ fn swap_state_db_for_reload(
     Ok(())
 }
 
-fn run_focus_loop(state: AppState) -> Result<()> {
+/// Dispatch the correct focus adapter based on `state.focus_source_kind`,
+/// receive events on a channel, and update the DB on each event.
+fn run_focus_dispatch(state: AppState) -> Result<()> {
+    let kind = state.focus_source_kind.as_str();
+    let source = focus::build(kind)?;
+    eprintln!("attn focus source: {}", source.name());
+
+    // Open an interval for the current window at startup.
     let paused = state.tracking_state.lock().unwrap().is_some();
     if !paused {
-        if let Some(window) = query_focused_window()? {
+        if let Some(window) = source.poll_current()? {
             let config = state.config.lock().unwrap().clone();
             let resolved = resolve_focused_window(window, &config);
             open_app_interval(&state.db.lock().unwrap(), Utc::now(), &resolved)?;
         }
     }
 
-    loop {
-        match spawn_niri_event_stream() {
-            Ok(mut child) => {
-                let stdout = match child.stdout.take() {
-                    Some(s) => s,
-                    None => {
-                        eprintln!("attn niri event stream: stdout unavailable");
-                        let _ = child.wait();
-                        thread::sleep(StdDuration::from_secs(2));
-                        continue;
-                    }
-                };
-                let reader = BufReader::new(stdout);
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(error) => {
-                            eprintln!("attn niri event stream read error: {error:#}");
-                            break;
-                        }
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if is_focus_event(&line) {
-                        if let Err(error) = handle_focus_change(&state) {
-                            eprintln!("attn focus change error: {error:#}");
-                        }
-                    }
-                }
-                let _ = child.wait();
-                thread::sleep(StdDuration::from_secs(1));
-            }
-            Err(error) => {
-                eprintln!("attn niri event stream unavailable: {error:#}");
-                thread::sleep(StdDuration::from_secs(5));
-                if let Ok(Some(_window)) = query_focused_window() {
-                    if let Err(error) = handle_focus_change(&state) {
-                        eprintln!("attn focus poll error: {error:#}");
-                    }
-                }
-            }
+    let (tx, rx) = std::sync::mpsc::channel::<focus::FocusEvent>();
+
+    thread::spawn(move || {
+        if let Err(error) = source.run(tx) {
+            eprintln!("attn focus source exited: {error:#}");
+        }
+    });
+
+    for event in rx {
+        let window = match event {
+            focus::FocusEvent::Focused(w) => Some(w),
+            focus::FocusEvent::Unfocused => None,
+        };
+        if let Err(error) = handle_focus_change_with(&state, window) {
+            eprintln!("attn focus change error: {error:#}");
         }
     }
+
+    Ok(())
 }
 
-fn spawn_niri_event_stream() -> Result<Child> {
-    Command::new("niri")
-        .args(["msg", "-j", "event-stream"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("failed to spawn niri event-stream")
-}
-
-fn is_focus_event(line: &str) -> bool {
-    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else {
-        return false;
-    };
-
-    event.keys().any(|key| {
-        matches!(
-            key.as_str(),
-            "WindowFocusChanged"
-                | "WorkspaceActiveWindowChanged"
-                | "WorkspaceActivated"
-                | "WorkspacesChanged"
-        )
-    })
-}
-
-fn handle_focus_change(state: &AppState) -> Result<()> {
+fn handle_focus_change_with(state: &AppState, current_window: Option<focus::FocusedWindow>) -> Result<()> {
     let now = Utc::now();
     let paused = state.tracking_state.lock().unwrap().is_some();
     let config = state.config.lock().unwrap().clone();
@@ -1721,7 +1711,7 @@ fn handle_focus_change(state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    let current = query_focused_window()?.map(|w| resolve_focused_window(w, &config));
+    let current = current_window.map(|w| resolve_focused_window(w, &config));
     match (open, current) {
         (Some(open), Some(window)) if open.matches(&window) => {}
         (Some(_), Some(window)) => {
@@ -1739,13 +1729,15 @@ fn handle_focus_change(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct FocusedWindow {
-    window_id: Option<i64>,
-    app_id: String,
-    title: String,
-    pid: Option<i32>,
+/// Poll the currently focused window via the stored focus source kind.
+fn query_focused_window(state: &AppState) -> Result<Option<FocusedWindow>> {
+    let kind = state.focus_source_kind.as_str();
+    let source = focus::build(kind)?;
+    source.poll_current()
 }
+
+/// Re-exported from focus module for local use.
+use focus::FocusedWindow;
 
 #[derive(Clone, Debug)]
 struct OpenAppInterval {
@@ -1764,29 +1756,6 @@ impl OpenAppInterval {
         }
         true
     }
-}
-
-fn query_focused_window() -> Result<Option<FocusedWindow>> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "focused-window"])
-        .output()
-        .context("failed to run niri focused-window")?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value: Value = serde_json::from_slice(&output.stdout).context("invalid niri JSON")?;
-    let Some(app_id) = json_find_string(&value, &["app_id", "app-id", "appId"]) else {
-        return Ok(None);
-    };
-    let window_id = json_find_i64(&value, &["id", "window_id", "window-id", "windowId"]);
-    let title = json_find_string(&value, &["title", "window_title", "name"]).unwrap_or_default();
-    let pid = json_find_i64(&value, &["pid", "process_id", "processId"]).and_then(|v| i32::try_from(v).ok());
-    Ok(Some(FocusedWindow {
-        window_id,
-        app_id: normalize_id(&app_id),
-        title,
-        pid,
-    }))
 }
 
 fn resolve_focused_window(mut window: FocusedWindow, config: &Config) -> FocusedWindow {
@@ -1984,39 +1953,6 @@ fn read_proc_program_name(pid: i32) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn json_find_string(value: &Value, names: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(Value::String(value)) = map.get(*name) {
-                    return Some(value.clone());
-                }
-            }
-            map.values()
-                .find_map(|child| json_find_string(child, names))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|child| json_find_string(child, names)),
-        _ => None,
-    }
-}
-
-fn json_find_i64(value: &Value, names: &[&str]) -> Option<i64> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(value) = map.get(*name).and_then(Value::as_i64) {
-                    return Some(value);
-                }
-            }
-            map.values().find_map(|child| json_find_i64(child, names))
-        }
-        Value::Array(items) => items.iter().find_map(|child| json_find_i64(child, names)),
-        _ => None,
-    }
 }
 
 fn migrate(db: &Connection) -> Result<()> {
@@ -3195,24 +3131,24 @@ fn run_doctor() -> Result<()> {
         }
     }
 
-    match Command::new("niri")
-        .args(["msg", "-j", "focused-window"])
-        .output()
     {
-        Ok(output) if output.status.success() => println!("niri: ok"),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!(
-                "niri: error (attn only works with niri): {}",
-                stderr.trim()
-            );
-            ok = false;
-        }
-        Err(error) => {
-            println!(
-                "niri: not found ({error}). attn currently requires the niri Wayland compositor (https://github.com/YaLTeR/niri)."
-            );
-            ok = false;
+        let kind = &config.focus_source.kind;
+        let resolved = if kind == "auto" { focus::auto_detect() } else { kind.as_str() };
+        match focus::build(resolved) {
+            Ok(source) => {
+                let probe = source.poll_current();
+                match probe {
+                    Ok(_) => println!("focus_source: {} (kind = {kind})", source.name()),
+                    Err(error) => {
+                        println!("focus_source: {} (kind = {kind}) — probe failed: {error:#}", source.name());
+                        warnings.push(format!("focus source probe failed: {error:#}"));
+                    }
+                }
+            }
+            Err(error) => {
+                println!("focus_source: error building source (kind = {kind}): {error:#}");
+                ok = false;
+            }
         }
     }
 
@@ -3502,6 +3438,7 @@ mod tests {
 
     #[test]
     fn niri_focus_event_detection_uses_top_level_event_names() {
+        use crate::focus::niri::is_focus_event;
         assert!(is_focus_event(r#"{"WindowFocusChanged":{"id":42}}"#));
         assert!(is_focus_event(
             r#"{"WorkspaceActiveWindowChanged":{"workspace_id":1,"active_window_id":42}}"#
@@ -4203,6 +4140,7 @@ mod tests {
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
         };
 
         swap_state_db_for_reload(&state, &old_config, &new_config, now).unwrap();
@@ -4249,6 +4187,7 @@ mod tests {
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
         };
 
         let browser = BrowserConfig {
@@ -4348,6 +4287,7 @@ mod tests {
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
         };
         let (client, server) = UnixStream::pair().unwrap();
         drop(client);
@@ -4373,6 +4313,7 @@ mod tests {
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
             last_rebuild: Arc::new(Mutex::new(None)),
             tracking_state: Arc::new(Mutex::new(Some(idle_pause))),
+            focus_source_kind: Arc::new("niri".to_string()),
         };
 
         let response = set_pause(&state, PauseReason::Manual).unwrap();
@@ -4524,5 +4465,44 @@ mod tests {
             Utc::now().timestamp_micros()
         ));
         path
+    }
+
+    // ----- focus source tests -----
+
+    #[test]
+    fn auto_detect_returns_niri_when_niri_socket_set() {
+        // Set NIRI_SOCKET; also set HYPRLAND to prove niri wins.
+        env::set_var("NIRI_SOCKET", "/run/user/1000/niri.sock");
+        env::set_var("HYPRLAND_INSTANCE_SIGNATURE", "some-sig");
+        let result = focus::auto_detect();
+        env::remove_var("NIRI_SOCKET");
+        env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
+        assert_eq!(result, "niri");
+    }
+
+    #[test]
+    fn auto_detect_returns_hyprland_when_signature_set_and_no_niri() {
+        env::remove_var("NIRI_SOCKET");
+        env::set_var("HYPRLAND_INSTANCE_SIGNATURE", "some-sig");
+        env::remove_var("SWAYSOCK");
+        let result = focus::auto_detect();
+        env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
+        assert_eq!(result, "hyprland");
+    }
+
+    #[test]
+    fn hyprland_is_focus_event_line_matches_activewindow() {
+        use crate::focus::hyprland::is_focus_event_line;
+        assert!(is_focus_event_line("activewindow>>title,class"));
+        assert!(is_focus_event_line("activewindowv2>>deadbeef"));
+        assert!(!is_focus_event_line("openwindow>>address"));
+        assert!(!is_focus_event_line(""));
+    }
+
+    #[test]
+    fn hyprland_is_focus_event_line_does_not_panic_on_empty() {
+        use crate::focus::hyprland::is_focus_event_line;
+        assert!(!is_focus_event_line(""));
+        assert!(!is_focus_event_line("   "));
     }
 }

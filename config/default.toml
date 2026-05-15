@@ -58,6 +58,9 @@ enabled = true
 interval_secs = 3600
 min_break_secs = 300
 
+[focus_source]
+kind = "auto"   # auto | niri | hyprland | river | sway
+
 [apps.watch]
 chat = [
   "discord",
