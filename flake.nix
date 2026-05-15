@@ -17,12 +17,13 @@
         nixpkgs.lib.genAttrs systems (system:
           f nixpkgs.legacyPackages.${system});
       defaultConfig = builtins.readFile ./config/default.toml;
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
     in
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "attn";
-          version = "0.1.0";
+          version = cargoToml.package.version;
 
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
