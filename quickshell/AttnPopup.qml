@@ -38,6 +38,10 @@ PopupWindow {
     property int breakIntervalSecs: 3600
     property int breaksMinBreakSecs: 300
 
+    property var uncategorizedApps: []
+    property var uncategorizedDomains: []
+    property bool otherExpanded: false
+
     property bool settingsOpen: false
     property bool animationsReady: false
     readonly property int todayListMaxHeight: 264
@@ -210,6 +214,18 @@ PopupWindow {
         });
         list.sort(function(a, b) { return (b.seconds || 0) - (a.seconds || 0); });
         return list;
+    }
+
+    function uncategorizedAppsList() {
+        return (popup.uncategorizedApps || []).slice().sort(function(a, b) {
+            return (b.seconds || 0) - (a.seconds || 0);
+        });
+    }
+
+    function uncategorizedDomainsList() {
+        return (popup.uncategorizedDomains || []).slice().sort(function(a, b) {
+            return (b.seconds || 0) - (a.seconds || 0);
+        });
     }
 
     function categoryColor(name) {
@@ -1113,6 +1129,306 @@ PopupWindow {
                     }
                 }
             }
+        }
+
+        // Other (uncategorized) drawer — shown only when there is data.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            visible: popup.viewMode === "today" && (
+                popup.uncategorizedAppsList().length > 0 ||
+                popup.uncategorizedDomainsList().length > 0
+            )
+
+            // Divider
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.2)
+            }
+
+            // Header row — clickable chevron toggle
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Text {
+                    text: popup.otherExpanded ? "\u{F0140}" : "\u{F0142}"
+                    color: popup.textDim
+                    font.family: popup.fontFamily
+                    font.pixelSize: 11
+                }
+                Text {
+                    text: "Other"
+                    color: popup.textColor
+                    font.family: popup.fontFamily
+                    font.pixelSize: 11
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: popup.otherExpanded = !popup.otherExpanded
+                }
+            }
+
+            // Expanded content
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                visible: popup.otherExpanded
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    spacing: 16
+
+                    // Uncategorized apps column
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 2
+                        visible: popup.uncategorizedAppsList().length > 0
+
+                        Text {
+                            text: "Apps"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 10
+                            Layout.bottomMargin: 2
+                        }
+
+                        ListView {
+                            id: otherAppsList
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(contentHeight, popup.todayListMaxHeight)
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            interactive: contentHeight > height
+                            spacing: 2
+                            model: popup.uncategorizedAppsList()
+                            delegate: Item {
+                                required property var modelData
+                                width: Math.max(0, otherAppsList.width - (otherAppsList.interactive ? 8 : 0))
+                                height: 28
+
+                                readonly property bool isSynthetic: modelData.id === "(below threshold)"
+
+                                AttnRow {
+                                    width: parent.isSynthetic ? parent.width : parent.width - 22
+                                    height: parent.height
+                                    icon: "\u{F01C4}"
+                                    label: popup.cleanAppName(modelData.id)
+                                    category: ""
+                                    seconds: modelData.seconds || 0
+                                    watched: false
+                                    maxSeconds: popup.maxSeconds(popup.uncategorizedAppsList())
+                                    textColor: popup.textColor
+                                    textDim: popup.textDim
+                                    accentColor: popup.accentColor
+                                    bgSecondary: popup.bgSecondary
+                                    watchedAccent: popup.watchedAccent
+                                    watchedBg: popup.watchedBg
+                                    fontFamily: popup.fontFamily
+                                    animateBar: popup.animationsReady
+                                }
+
+                                Rectangle {
+                                    visible: !parent.isSynthetic
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 18
+                                    height: 18
+                                    radius: 9
+                                    color: addAppMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.3) : popup.bgSecondary
+                                    border.width: 1
+                                    border.color: popup.accentColor
+
+                                    Behavior on color { ColorAnimation { duration: 120 } }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "+"
+                                        color: popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 13
+                                    }
+
+                                    MouseArea {
+                                        id: addAppMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            categoryPickerKind = "app";
+                                            categoryPickerItemId = parent.parent.modelData.id;
+                                            categoryPickerMenu.popup();
+                                        }
+                                    }
+                                }
+                            }
+
+                            ScrollBar.vertical: ScrollBar {
+                                policy: otherAppsList.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                                width: 5
+                                contentItem: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2
+                                    color: Qt.rgba(popup.watchedAccent.r, popup.watchedAccent.g, popup.watchedAccent.b, 0.65)
+                                }
+                                background: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2
+                                    color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.14)
+                                }
+                            }
+                        }
+                    }
+
+                    // Uncategorized domains column
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 2
+                        visible: popup.uncategorizedDomainsList().length > 0
+
+                        Text {
+                            text: "Domains"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 10
+                            Layout.bottomMargin: 2
+                        }
+
+                        ListView {
+                            id: otherDomainsList
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(contentHeight, popup.todayListMaxHeight)
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            interactive: contentHeight > height
+                            spacing: 2
+                            model: popup.uncategorizedDomainsList()
+                            delegate: Item {
+                                required property var modelData
+                                width: Math.max(0, otherDomainsList.width - (otherDomainsList.interactive ? 8 : 0))
+                                height: 28
+
+                                readonly property bool isSynthetic: modelData.domain === "(below threshold)"
+
+                                AttnRow {
+                                    width: parent.isSynthetic ? parent.width : parent.width - 22
+                                    height: parent.height
+                                    icon: "\u{F059F}"
+                                    label: popup.cleanDomainName(modelData.domain)
+                                    category: ""
+                                    seconds: modelData.seconds || 0
+                                    watched: false
+                                    maxSeconds: popup.maxSeconds(popup.uncategorizedDomainsList())
+                                    textColor: popup.textColor
+                                    textDim: popup.textDim
+                                    accentColor: popup.accentColor
+                                    bgSecondary: popup.bgSecondary
+                                    watchedAccent: popup.watchedAccent
+                                    watchedBg: popup.watchedBg
+                                    fontFamily: popup.fontFamily
+                                    animateBar: popup.animationsReady
+                                }
+
+                                Rectangle {
+                                    visible: !parent.isSynthetic
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 18
+                                    height: 18
+                                    radius: 9
+                                    color: addDomainMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.3) : popup.bgSecondary
+                                    border.width: 1
+                                    border.color: popup.accentColor
+
+                                    Behavior on color { ColorAnimation { duration: 120 } }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "+"
+                                        color: popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 13
+                                    }
+
+                                    MouseArea {
+                                        id: addDomainMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            categoryPickerKind = "domain";
+                                            categoryPickerItemId = parent.parent.modelData.domain;
+                                            categoryPickerMenu.popup();
+                                        }
+                                    }
+                                }
+                            }
+
+                            ScrollBar.vertical: ScrollBar {
+                                policy: otherDomainsList.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                                width: 5
+                                contentItem: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2
+                                    color: Qt.rgba(popup.watchedAccent.r, popup.watchedAccent.g, popup.watchedAccent.b, 0.65)
+                                }
+                                background: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2
+                                    color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.14)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Category picker state (shared by app and domain "+" buttons)
+        property string categoryPickerKind: ""
+        property string categoryPickerItemId: ""
+
+        Menu {
+            id: categoryPickerMenu
+            title: "Add to category"
+
+            Instantiator {
+                model: popup.categories
+                delegate: MenuItem {
+                    required property var modelData
+                    text: modelData.name || ""
+                    onTriggered: {
+                        attnCategorize.categorizeKind = popup.categoryPickerKind;
+                        attnCategorize.categorizeId = popup.categoryPickerItemId;
+                        attnCategorize.categorizeCategory = modelData.name;
+                        attnCategorize.running = true;
+                    }
+                }
+                onObjectAdded: (index, object) => categoryPickerMenu.insertItem(index, object)
+                onObjectRemoved: (index, object) => categoryPickerMenu.removeItem(object)
+            }
+        }
+
+        Process {
+            id: attnCategorize
+            property string categorizeKind: ""
+            property string categorizeId: ""
+            property string categorizeCategory: ""
+            command: ["attn", "categorize",
+                "--kind=" + categorizeKind,
+                "--id=" + categorizeId,
+                "--category=" + categorizeCategory]
+            onExited: popup.statusRefreshRequested()
         }
 
         Process {

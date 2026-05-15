@@ -90,6 +90,37 @@ fn run() -> Result<()> {
             println!("{response}");
             Ok(())
         }
+        Some("categorize") => {
+            let mut kind: Option<String> = None;
+            let mut id: Option<String> = None;
+            let mut category: Option<String> = None;
+            for arg in args {
+                if let Some(v) = arg.strip_prefix("--kind=") {
+                    kind = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--id=") {
+                    id = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--category=") {
+                    category = Some(v.to_string());
+                }
+            }
+            let kind = kind.ok_or_else(|| anyhow!("categorize requires --kind=app|domain"))?;
+            let id = id.ok_or_else(|| anyhow!("categorize requires --id=<value>"))?;
+            let category = category.ok_or_else(|| anyhow!("categorize requires --category=<name>"))?;
+            let kind_enum = match kind.as_str() {
+                "app" => CategorizeKind::App,
+                "domain" => CategorizeKind::Domain,
+                other => bail!("unknown kind {:?}; expected app or domain", other),
+            };
+            let payload = serde_json::to_string(&CategorizeRequest {
+                kind: kind_enum,
+                id,
+                category,
+            })?;
+            let cfg = Config::load_default()?;
+            let response = socket_request(&cfg.socket_path, &format!("categorize {payload}\n"))?;
+            println!("{response}");
+            Ok(())
+        }
         Some("init") => {
             let mut force = false;
             let mut merge = false;
@@ -113,7 +144,7 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn init [--force|--merge]\n  attn doctor"
+        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn categorize --kind=app|domain --id=<id> --category=<name>\n  attn init [--force|--merge]\n  attn doctor"
     );
 }
 
@@ -1570,6 +1601,18 @@ fn handle_client(state: AppState, mut stream: UnixStream) -> Result<()> {
                 }))?
             }
         }
+        cmd if cmd.starts_with("categorize ") => {
+            let json_part = &cmd["categorize ".len()..];
+            match serde_json::from_str::<CategorizeRequest>(json_part) {
+                Ok(req) => {
+                    let resp = handle_categorize(&state, req)?;
+                    serde_json::to_string(&resp)?
+                }
+                Err(e) => serde_json::to_string(&CategorizeResponse::err(format!(
+                    "invalid categorize payload: {e}"
+                )))?,
+            }
+        }
         other => serde_json::to_string(&serde_json::json!({
             "ok": false,
             "error": format!("unknown request: {other}")
@@ -1609,6 +1652,137 @@ struct PauseResponse {
     paused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     paused_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CategorizeKind {
+    App,
+    Domain,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CategorizeRequest {
+    kind: CategorizeKind,
+    id: String,
+    category: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CategorizeResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CategorizeResponse {
+    fn ok() -> Self { Self { ok: true, error: None } }
+    fn err(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()) } }
+}
+
+fn handle_categorize(state: &AppState, req: CategorizeRequest) -> Result<CategorizeResponse> {
+    use toml_edit::{DocumentMut, Item, Value, Array};
+    use std::time::SystemTime;
+
+    let config_path = expand_path(DEFAULT_CONFIG_PATH);
+    if !config_path.exists() {
+        return Ok(CategorizeResponse::err("config file not found"));
+    }
+
+    let mtime_before: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+
+    // Validate category exists in running config.
+    {
+        let config = state.config.lock().unwrap();
+        let watch = match req.kind {
+            CategorizeKind::App => &config.apps.watch,
+            CategorizeKind::Domain => &config.domains.watch,
+        };
+        if !watch.contains_key(&req.category) {
+            return Ok(CategorizeResponse::err(format!(
+                "category {:?} not found; existing categories: {}",
+                req.category,
+                watch.keys().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+
+    // Parse with toml_edit to preserve comments and ordering.
+    let mut doc = raw.parse::<DocumentMut>()
+        .with_context(|| "failed to parse config with toml_edit")?;
+
+    let section_key = match req.kind {
+        CategorizeKind::App => "apps",
+        CategorizeKind::Domain => "domains",
+    };
+
+    // Navigate to [apps].watch.<category> or [domains].watch.<category>
+    let section = doc
+        .get_mut(section_key)
+        .and_then(|s| s.as_table_mut())
+        .and_then(|t| t.get_mut("watch"))
+        .and_then(|w| w.as_table_mut())
+        .and_then(|t| t.get_mut(&req.category))
+        .and_then(|v| v.as_array_mut());
+
+    match section {
+        Some(arr) => {
+            let already_present = arr.iter().any(|v| {
+                v.as_str().map_or(false, |s| s == req.id)
+            });
+            if !already_present {
+                arr.push(req.id.as_str());
+            }
+        }
+        None => {
+            // Category exists in runtime config but not (yet) in the file.
+            let mut arr = Array::new();
+            arr.push(req.id.as_str());
+            let watch_table = doc
+                .get_mut(section_key)
+                .and_then(|s| s.as_table_mut())
+                .and_then(|t| t.get_mut("watch"))
+                .and_then(|w| w.as_table_mut());
+            if let Some(t) = watch_table {
+                t.insert(&req.category, Item::Value(Value::Array(arr)));
+            } else {
+                return Ok(CategorizeResponse::err(format!(
+                    "[{section_key}].watch not found in config"
+                )));
+            }
+        }
+    }
+
+    // Re-check mtime to detect concurrent edits.
+    let mtime_after: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if mtime_after != mtime_before {
+        return Ok(CategorizeResponse::err("config changed on disk, retry"));
+    }
+
+    // Write atomically via tempfile in the same directory.
+    let parent = config_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".attn-config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)
+        .context("failed to create temp config file")?;
+    tmp.write_all(doc.to_string().as_bytes())
+        .context("failed to write temp config")?;
+    tmp.flush().context("failed to flush temp config")?;
+    tmp.persist(&config_path)
+        .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
+
+    // Trigger daemon reload so the new entry is picked up immediately.
+    let _ = reload_daemon_config(state);
+
+    Ok(CategorizeResponse::ok())
 }
 
 fn apply_breaks_override(
@@ -2262,6 +2436,10 @@ struct Status {
     breaks_enabled: bool,
     breaks_interval_secs: i64,
     breaks_min_break_secs: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    uncategorized_apps: Vec<AppStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    uncategorized_domains: Vec<DomainStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2434,6 +2612,9 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
         && !paused
         && active_session_seconds >= config.breaks.interval_secs;
 
+    let uncategorized_apps = build_uncategorized_apps(&apps, &browser_ids);
+    let uncategorized_domains = build_uncategorized_domains(&domains, config.display.domains_min_seconds);
+
     Ok(Status {
         date: day_string,
         updated_at: Local::now().to_rfc3339(),
@@ -2451,6 +2632,8 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
         breaks_enabled: config.breaks.enabled,
         breaks_interval_secs: config.breaks.interval_secs,
         breaks_min_break_secs: config.breaks.min_break_secs,
+        uncategorized_apps,
+        uncategorized_domains,
     })
 }
 
@@ -2579,6 +2762,73 @@ fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result
     let tracked_seconds: i64 = categories.iter().map(|c| c.seconds).sum();
 
     Ok(DaySummary { date: day_string, tracked_seconds, watch_seconds, categories })
+}
+
+const UNCATEGORIZED_CAP: usize = 25;
+
+fn build_uncategorized_apps(apps: &[AppStatus], browser_ids: &HashSet<String>) -> Vec<AppStatus> {
+    let mut items: Vec<&AppStatus> = apps
+        .iter()
+        .filter(|a| !a.watched && !browser_ids.contains(&normalize_id(&a.id)) && a.seconds >= 60)
+        .collect();
+    items.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+
+    if items.len() <= UNCATEGORIZED_CAP {
+        items.iter().map(|a| AppStatus {
+            id: a.id.clone(),
+            seconds: a.seconds,
+            watched: false,
+            category: None,
+        }).collect()
+    } else {
+        let mut result: Vec<AppStatus> = items[..UNCATEGORIZED_CAP].iter().map(|a| AppStatus {
+            id: a.id.clone(),
+            seconds: a.seconds,
+            watched: false,
+            category: None,
+        }).collect();
+        let tail_seconds: i64 = items[UNCATEGORIZED_CAP..].iter().map(|a| a.seconds).sum();
+        result.push(AppStatus {
+            id: "(below threshold)".to_string(),
+            seconds: tail_seconds,
+            watched: false,
+            category: None,
+        });
+        result
+    }
+}
+
+fn build_uncategorized_domains(domains: &[DomainStatus], min_seconds: i64) -> Vec<DomainStatus> {
+    let threshold = min_seconds.max(1);
+    let mut items: Vec<&DomainStatus> = domains
+        .iter()
+        .filter(|d| !d.watched && d.seconds >= threshold)
+        .collect();
+    items.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+
+    if items.len() <= UNCATEGORIZED_CAP {
+        items.iter().map(|d| DomainStatus {
+            domain: d.domain.clone(),
+            seconds: d.seconds,
+            watched: false,
+            category: None,
+        }).collect()
+    } else {
+        let mut result: Vec<DomainStatus> = items[..UNCATEGORIZED_CAP].iter().map(|d| DomainStatus {
+            domain: d.domain.clone(),
+            seconds: d.seconds,
+            watched: false,
+            category: None,
+        }).collect();
+        let tail_seconds: i64 = items[UNCATEGORIZED_CAP..].iter().map(|d| d.seconds).sum();
+        result.push(DomainStatus {
+            domain: "(below threshold)".to_string(),
+            seconds: tail_seconds,
+            watched: false,
+            category: None,
+        });
+        result
+    }
 }
 
 fn rebuild_daily_totals(db: &Connection, config: &Config, now: DateTime<Utc>) -> Result<()> {
@@ -4577,7 +4827,6 @@ mod tests {
 
     #[test]
     fn auto_detect_returns_niri_when_niri_socket_set() {
-        // Set NIRI_SOCKET; also set HYPRLAND to prove niri wins.
         env::set_var("NIRI_SOCKET", "/run/user/1000/niri.sock");
         env::set_var("HYPRLAND_INSTANCE_SIGNATURE", "some-sig");
         let result = focus::auto_detect();
@@ -4838,5 +5087,165 @@ mod tests {
 
         run_notification_check(&state).unwrap();
         assert_eq!(rec.call_count(), 2, "break-overdue should refire after break");
+    }
+
+    // ----- Phase 5: uncategorized + categorize tests -----
+
+    #[test]
+    fn uncategorized_apps_filters_watched_and_low_seconds() {
+        let browser_ids: HashSet<String> = HashSet::new();
+        let apps = vec![
+            AppStatus { id: "firefox".to_string(), seconds: 120, watched: false, category: None },
+            AppStatus { id: "code".to_string(), seconds: 500, watched: true, category: Some("coding".to_string()) },
+            AppStatus { id: "tiny".to_string(), seconds: 30, watched: false, category: None },
+        ];
+        let result = build_uncategorized_apps(&apps, &browser_ids);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "firefox");
+    }
+
+    #[test]
+    fn uncategorized_apps_excludes_browser_ids() {
+        let mut browser_ids = HashSet::new();
+        browser_ids.insert("brave-browser".to_string());
+        let apps = vec![
+            AppStatus { id: "brave-browser".to_string(), seconds: 600, watched: false, category: None },
+            AppStatus { id: "mpv".to_string(), seconds: 120, watched: false, category: None },
+        ];
+        let result = build_uncategorized_apps(&apps, &browser_ids);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "mpv");
+    }
+
+    #[test]
+    fn uncategorized_apps_cap_produces_below_threshold_row() {
+        let browser_ids: HashSet<String> = HashSet::new();
+        let apps: Vec<AppStatus> = (0..30)
+            .map(|i| AppStatus {
+                id: format!("app{i}"),
+                seconds: 100 + i as i64,
+                watched: false,
+                category: None,
+            })
+            .collect();
+        let result = build_uncategorized_apps(&apps, &browser_ids);
+        assert_eq!(result.len(), UNCATEGORIZED_CAP + 1);
+        let tail = result.last().unwrap();
+        assert_eq!(tail.id, "(below threshold)");
+        assert!(!tail.watched);
+        let mut sorted_secs: Vec<i64> = apps.iter().map(|a| a.seconds).collect();
+        sorted_secs.sort();
+        let expected_tail: i64 = sorted_secs[..5].iter().sum();
+        assert_eq!(tail.seconds, expected_tail);
+    }
+
+    #[test]
+    fn uncategorized_domains_filters_watched_and_below_min() {
+        let domains = vec![
+            DomainStatus { domain: "example.com".to_string(), seconds: 60, watched: false, category: None },
+            DomainStatus { domain: "github.com".to_string(), seconds: 200, watched: true, category: Some("coding".to_string()) },
+            DomainStatus { domain: "tiny.io".to_string(), seconds: 5, watched: false, category: None },
+        ];
+        let result = build_uncategorized_domains(&domains, 30);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "example.com");
+    }
+
+    #[test]
+    fn handle_categorize_toml_edit_round_trip_preserves_existing_entries() {
+        use toml_edit::DocumentMut;
+        let toml_content = "[apps.watch]\ncoding = [\"code\", \"zed\"]\nterminal = [\"ghostty\"]\n";
+        let mut doc = toml_content.parse::<DocumentMut>().unwrap();
+        let arr = doc["apps"]["watch"]["coding"].as_array_mut().unwrap();
+        assert!(!arr.iter().any(|v| v.as_str() == Some("cursor")));
+        arr.push("cursor");
+        let out = doc.to_string();
+        assert!(out.contains("cursor"));
+        assert!(out.contains("zed"));
+        assert!(out.contains("ghostty"));
+    }
+
+    #[test]
+    fn handle_categorize_rejects_unknown_category() {
+        let mut watch = BTreeMap::new();
+        watch.insert("coding".to_string(), vec!["code".to_string()]);
+        let config = Config {
+            apps: AppsConfig { watch },
+            ..Default::default()
+        };
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+        };
+        let req = CategorizeRequest {
+            kind: CategorizeKind::App,
+            id: "firefox".to_string(),
+            category: "nonexistent".to_string(),
+        };
+        let resp = handle_categorize(&state, req).unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_deref().unwrap_or("").contains("not found"));
+    }
+
+    #[test]
+    fn status_json_omits_uncategorized_when_empty() {
+        let status = Status {
+            date: "2026-05-15".to_string(),
+            updated_at: "2026-05-15T12:00:00+00:00".to_string(),
+            watch_seconds: 0,
+            tracked_seconds: 0,
+            apps: vec![],
+            domains: vec![],
+            categories: vec![],
+            days: vec![],
+            active_session_seconds: 0,
+            break_overdue: false,
+            paused: false,
+            paused_reason: None,
+            paused_since: None,
+            breaks_enabled: true,
+            breaks_interval_secs: 3600,
+            breaks_min_break_secs: 300,
+            uncategorized_apps: vec![],
+            uncategorized_domains: vec![],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("uncategorized_apps"), "empty vec should be omitted");
+        assert!(!json.contains("uncategorized_domains"), "empty vec should be omitted");
+    }
+
+    #[test]
+    fn status_json_includes_uncategorized_when_present() {
+        let status = Status {
+            date: "2026-05-15".to_string(),
+            updated_at: "2026-05-15T12:00:00+00:00".to_string(),
+            watch_seconds: 0,
+            tracked_seconds: 0,
+            apps: vec![],
+            domains: vec![],
+            categories: vec![],
+            days: vec![],
+            active_session_seconds: 0,
+            break_overdue: false,
+            paused: false,
+            paused_reason: None,
+            paused_since: None,
+            breaks_enabled: true,
+            breaks_interval_secs: 3600,
+            breaks_min_break_secs: 300,
+            uncategorized_apps: vec![AppStatus { id: "obs".to_string(), seconds: 120, watched: false, category: None }],
+            uncategorized_domains: vec![],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("uncategorized_apps"));
+        assert!(json.contains("obs"));
     }
 }

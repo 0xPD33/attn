@@ -28,6 +28,8 @@ Item {
     property bool breaksEnabled: true
     property int breaksIntervalSecs: 3600
     property int breaksMinBreakSecs: 300
+    property var uncategorizedApps: []
+    property var uncategorizedDomains: []
 
     signal clicked()
 
@@ -92,6 +94,8 @@ Item {
                     if (status.breaks_enabled !== undefined) root.breaksEnabled = !!status.breaks_enabled;
                     if (status.breaks_interval_secs !== undefined) root.breaksIntervalSecs = Number(status.breaks_interval_secs);
                     if (status.breaks_min_break_secs !== undefined) root.breaksMinBreakSecs = Number(status.breaks_min_break_secs);
+                    root.uncategorizedApps = status.uncategorized_apps || [];
+                    root.uncategorizedDomains = status.uncategorized_domains || [];
                     root.stale = false;
                 } catch (e) {
                     root.stale = true;
