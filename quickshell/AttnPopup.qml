@@ -245,6 +245,17 @@ PopupWindow {
         }
     }
 
+    function formatBudget(seconds, budgetSecs) {
+        if (!budgetSecs || budgetSecs <= 0) return "";
+        return formatDuration(seconds) + " / " + formatDuration(budgetSecs);
+    }
+
+    function categoryAlertColor(name, overBudget) {
+        return overBudget
+            ? Qt.tint(categoryColor(name), Qt.rgba(0.85, 0.48, 0.42, 0.55))
+            : categoryColor(name);
+    }
+
     function iconFor(label, category, type) {
         var name = String(label || "").toLowerCase();
         var cat = String(category || "").toLowerCase();
@@ -789,12 +800,29 @@ PopupWindow {
                             Repeater {
                                 model: popup.topCategories(6)
                                 delegate: Rectangle {
+                                    id: barSegment
                                     required property var modelData
-                                    width: parent.width * (modelData.seconds || 0) / Math.max(1, popup.sumSeconds(popup.topCategories(6)))
+                                    readonly property int segSeconds: modelData.seconds || 0
+                                    readonly property int segBudget: modelData.budget_secs || 0
+                                    width: parent.width * segSeconds / Math.max(1, popup.sumSeconds(popup.topCategories(6)))
                                     height: parent.height
-                                    color: popup.categoryColor(modelData.name)
+                                    color: popup.categoryAlertColor(modelData.name, !!modelData.over_budget)
+                                    clip: true
 
                                     Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+
+                                    // Budget threshold stripe — only visible when budget is set and not yet exceeded
+                                    Rectangle {
+                                        visible: barSegment.segBudget > 0 && !modelData.over_budget && barSegment.segSeconds > 0
+                                        width: 1
+                                        height: parent.height
+                                        opacity: 0.4
+                                        color: "#ffffff"
+                                        x: Math.min(
+                                            barSegment.width * barSegment.segBudget / Math.max(1, barSegment.segSeconds),
+                                            barSegment.width - 1
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -814,19 +842,20 @@ PopupWindow {
                                     width: 6
                                     height: 6
                                     radius: 3
-                                    color: popup.categoryColor(modelData.name)
+                                    color: popup.categoryAlertColor(modelData.name, !!modelData.over_budget)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
                                 Text {
                                     text: modelData.name
-                                    color: popup.textColor
+                                    color: modelData.over_budget ? "#d97b6c" : popup.textColor
                                     font.family: popup.fontFamily
                                     font.pixelSize: 10
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
                                 Text {
-                                    text: popup.formatDuration(modelData.seconds || 0)
-                                    color: popup.textDim
+                                    readonly property string budgetStr: popup.formatBudget(modelData.seconds || 0, modelData.budget_secs || 0)
+                                    text: budgetStr !== "" ? budgetStr : popup.formatDuration(modelData.seconds || 0)
+                                    color: modelData.over_budget ? "#d97b6c" : popup.textDim
                                     font.family: popup.fontFamily
                                     font.pixelSize: 10
                                     anchors.verticalCenter: parent.verticalCenter

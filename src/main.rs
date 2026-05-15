@@ -2190,6 +2190,8 @@ struct CategoryStatus {
     seconds: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    over_budget: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2311,7 +2313,8 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
                 .budgets
                 .get(&name)
                 .and_then(|b| (b.daily_budget_secs > 0).then_some(b.daily_budget_secs));
-            CategoryStatus { name, seconds, budget_secs }
+            let over_budget = budget_secs.map_or(false, |b| seconds >= b);
+            CategoryStatus { name, seconds, budget_secs, over_budget }
         })
         .collect();
     categories.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
@@ -2398,7 +2401,7 @@ fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result
 
     let mut categories: Vec<CategoryStatus> = category_totals
         .into_iter()
-        .map(|(name, seconds)| CategoryStatus { name, seconds, budget_secs: None })
+        .map(|(name, seconds)| CategoryStatus { name, seconds, budget_secs: None, over_budget: false })
         .collect();
     categories.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
     let tracked_seconds: i64 = categories.iter().map(|c| c.seconds).sum();
@@ -4504,5 +4507,68 @@ mod tests {
         use crate::focus::hyprland::is_focus_event_line;
         assert!(!is_focus_event_line(""));
         assert!(!is_focus_event_line("   "));
+    }
+
+    #[test]
+    fn category_status_over_budget_when_seconds_exceed_budget() {
+        let cs = CategoryStatus {
+            name: "scroll".to_string(),
+            seconds: 700,
+            budget_secs: Some(600),
+            over_budget: 700 >= 600,
+        };
+        assert!(cs.over_budget);
+    }
+
+    #[test]
+    fn category_status_not_over_budget_when_below() {
+        let cs = CategoryStatus {
+            name: "scroll".to_string(),
+            seconds: 300,
+            budget_secs: Some(600),
+            over_budget: 300 >= 600,
+        };
+        assert!(!cs.over_budget);
+    }
+
+    #[test]
+    fn category_status_not_over_budget_when_at_zero() {
+        let cs = CategoryStatus {
+            name: "scroll".to_string(),
+            seconds: 0,
+            budget_secs: Some(600),
+            over_budget: 0 >= 600,
+        };
+        assert!(!cs.over_budget);
+    }
+
+    #[test]
+    fn category_status_not_over_budget_when_no_budget() {
+        let over = None::<i64>.map_or(false, |b: i64| 9999_i64 >= b);
+        assert!(!over);
+    }
+
+    #[test]
+    fn category_status_over_budget_serialization_omits_false() {
+        let cs = CategoryStatus {
+            name: "coding".to_string(),
+            seconds: 100,
+            budget_secs: None,
+            over_budget: false,
+        };
+        let json = serde_json::to_string(&cs).unwrap();
+        assert!(!json.contains("over_budget"), "over_budget should be omitted when false: {json}");
+    }
+
+    #[test]
+    fn category_status_over_budget_serialization_includes_true() {
+        let cs = CategoryStatus {
+            name: "scroll".to_string(),
+            seconds: 700,
+            budget_secs: Some(600),
+            over_budget: true,
+        };
+        let json = serde_json::to_string(&cs).unwrap();
+        assert!(json.contains("\"over_budget\":true"), "over_budget:true should appear in JSON: {json}");
     }
 }
