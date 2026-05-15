@@ -2300,8 +2300,25 @@ fn run_focus_dispatch(state: AppState) -> Result<()> {
 
 fn handle_focus_change_with(state: &AppState, current_window: Option<focus::FocusedWindow>) -> Result<()> {
     let now = Utc::now();
-    let paused = state.tracking_state.lock().unwrap().is_some();
     let config = state.config.lock().unwrap().clone();
+
+    // Auto-clear a stale manual pause once the user is active again after at
+    // least min_break_secs. The break has effectively been taken; resume.
+    if current_window.is_some() {
+        let mut tracking = state.tracking_state.lock().unwrap();
+        if let Some(info) = *tracking {
+            if info.reason == PauseReason::Manual
+                && (now - info.at).num_seconds() >= config.breaks.min_break_secs
+            {
+                let db = state.db.lock().unwrap();
+                persist_pause_state(&db, None)?;
+                meta_set(&db, "session_reset_at", &now.to_rfc3339())?;
+                *tracking = None;
+            }
+        }
+    }
+
+    let paused = state.tracking_state.lock().unwrap().is_some();
     let db = state.db.lock().unwrap();
     let open = open_app_identity(&db)?;
 
@@ -5232,6 +5249,81 @@ mod tests {
             meta_get(&db, "paused_reason").unwrap()
         };
         assert_eq!(persisted_reason.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn manual_pause_auto_clears_once_user_active_past_min_break() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let mut config = Config::default();
+        config.breaks.min_break_secs = 60;
+        let paused_at = Utc::now() - Duration::seconds(120);
+        let info = PauseInfo {
+            at: paused_at,
+            reason: PauseReason::Manual,
+        };
+        persist_pause_state(&db, Some(info)).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(Some(info))),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+
+        let window = focus::FocusedWindow {
+            window_id: Some(7),
+            app_id: "code".to_string(),
+            title: "src/main.rs".to_string(),
+            pid: None,
+        };
+        handle_focus_change_with(&state, Some(window)).unwrap();
+
+        assert!(state.tracking_state.lock().unwrap().is_none(), "manual pause should auto-clear");
+        let persisted = {
+            let db = state.db.lock().unwrap();
+            meta_get(&db, "paused_reason").unwrap()
+        };
+        assert!(persisted.is_none(), "persisted pause_reason should be cleared");
+    }
+
+    #[test]
+    fn manual_pause_does_not_clear_before_min_break() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let mut config = Config::default();
+        config.breaks.min_break_secs = 300;
+        let paused_at = Utc::now() - Duration::seconds(30);
+        let info = PauseInfo {
+            at: paused_at,
+            reason: PauseReason::Manual,
+        };
+        persist_pause_state(&db, Some(info)).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(Some(info))),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+
+        let window = focus::FocusedWindow {
+            window_id: Some(7),
+            app_id: "code".to_string(),
+            title: "src/main.rs".to_string(),
+            pid: None,
+        };
+        handle_focus_change_with(&state, Some(window)).unwrap();
+
+        assert!(state.tracking_state.lock().unwrap().is_some(), "manual pause should persist before min_break");
     }
 
     #[test]
