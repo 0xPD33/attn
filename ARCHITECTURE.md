@@ -54,6 +54,9 @@ attn break-start         pause tracking manually
 attn break-end           resume tracking
 attn set-breaks [...]    update break-reminder settings without editing TOML
 attn categorize          assign an uncategorized app/domain to a category (writes config.toml)
+attn set-budget          set or clear a daily budget for a category (writes config.toml)
+attn set-notifications   toggle notification flags without editing TOML (writes config.toml)
+attn set-focus-source    set focus source kind (writes config.toml; restart required)
 ```
 
 The CLI hides socket protocol details from Quickshell and shell scripts.
@@ -270,7 +273,11 @@ Requests are newline-terminated command strings. Responses are JSON, newline-ter
   "paused_since": null,
   "breaks_enabled": true,
   "breaks_interval_secs": 3600,
-  "breaks_min_break_secs": 300
+  "breaks_min_break_secs": 300,
+  "notifications_enabled": true,
+  "notifications_break_overdue": true,
+  "notifications_budget_exceeded": true,
+  "focus_source_kind": "auto"
 }
 ```
 

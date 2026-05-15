@@ -46,6 +46,12 @@ PopupWindow {
     property bool animationsReady: false
     readonly property int todayListMaxHeight: 264
 
+    property bool notificationsEnabled: true
+    property bool notificationsBreakOverdue: true
+    property bool notificationsBudgetExceeded: true
+    property string focusSourceKind: "auto"
+    property string settingsRestartHint: ""
+
     signal breakStartRequested()
     signal breakEndRequested()
     signal statusRefreshRequested()
@@ -330,6 +336,19 @@ PopupWindow {
         attnSetBreaks.desiredInterval = interval;
         attnSetBreaks.desiredMinBreak = minBreak;
         attnSetBreaks.running = true;
+    }
+
+    function applyNotificationSettings(enabled, breakOverdue, budgetExceeded) {
+        attnSetNotifications.nEnabled = enabled;
+        attnSetNotifications.nBreakOverdue = breakOverdue;
+        attnSetNotifications.nBudgetExceeded = budgetExceeded;
+        attnSetNotifications.running = true;
+    }
+
+    function applyFocusSource(kind) {
+        attnSetFocusSource.fsKind = kind;
+        attnSetFocusSource.running = true;
+        popup.settingsRestartHint = "Focus source saved — restart daemon to apply.";
     }
 
     function requestBreakStart() {
@@ -1453,6 +1472,35 @@ PopupWindow {
             onExited: popup.statusRefreshRequested()
         }
 
+        Process {
+            id: attnSetNotifications
+            property bool nEnabled: popup.notificationsEnabled
+            property bool nBreakOverdue: popup.notificationsBreakOverdue
+            property bool nBudgetExceeded: popup.notificationsBudgetExceeded
+            command: ["attn", "set-notifications",
+                "--enabled=" + (nEnabled ? "true" : "false"),
+                "--break-overdue=" + (nBreakOverdue ? "true" : "false"),
+                "--budget-exceeded=" + (nBudgetExceeded ? "true" : "false")]
+            onExited: popup.statusRefreshRequested()
+        }
+
+        Process {
+            id: attnSetFocusSource
+            property string fsKind: popup.focusSourceKind
+            command: ["attn", "set-focus-source", "--kind=" + fsKind]
+            onExited: popup.statusRefreshRequested()
+        }
+
+        Process {
+            id: attnSetBudget
+            property string budgetCategory: ""
+            property int budgetSecs: 0
+            command: ["attn", "set-budget",
+                "--category=" + budgetCategory,
+                "--secs=" + String(budgetSecs)]
+            onExited: popup.statusRefreshRequested()
+        }
+
         Rectangle {
             id: settingsOverlay
             anchors.fill: parent
@@ -1465,224 +1513,535 @@ PopupWindow {
 
             MouseArea { anchors.fill: parent }
 
-            ColumnLayout {
-                id: settingsContent
-                anchors.centerIn: parent
-                spacing: 18
-                width: parent.width * 0.78
+            // Header pinned at top
+            RowLayout {
+                id: settingsHeader
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.topMargin: 14
+                anchors.leftMargin: parent.width * 0.11
+                anchors.rightMargin: parent.width * 0.11
                 opacity: settingsOverlay.visible ? 1.0 : 0.0
                 scale: settingsOverlay.visible ? 1.0 : 0.94
 
                 Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
                 Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutBack } }
 
-                RowLayout {
+                Text {
+                    text: "\u{F0493}  Settings"
+                    color: popup.textColor
+                    font.family: popup.fontFamily
+                    font.pixelSize: 14
+                    font.bold: true
                     Layout.fillWidth: true
+                }
+                Rectangle {
+                    Layout.preferredWidth: 24
+                    Layout.preferredHeight: 24
+                    radius: 12
+                    color: closeMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.2) : "transparent"
+                    border.width: 1
+                    border.color: popup.accentColor
+
+                    Behavior on color { ColorAnimation { duration: 160 } }
 
                     Text {
-                        text: "\u{F0493}  Settings"
-                        color: popup.textColor
+                        anchors.centerIn: parent
+                        text: "×"
+                        color: popup.textDim
                         font.family: popup.fontFamily
-                        font.pixelSize: 14
-                        font.bold: true
-                        Layout.fillWidth: true
+                        font.pixelSize: 13
                     }
-                    Rectangle {
-                        Layout.preferredWidth: 24
-                        Layout.preferredHeight: 24
-                        radius: 12
-                        color: closeMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.2) : "transparent"
-                        border.width: 1
-                        border.color: popup.accentColor
-
-                        Behavior on color { ColorAnimation { duration: 160 } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "×"
-                            color: popup.textDim
-                            font.family: popup.fontFamily
-                            font.pixelSize: 13
-                        }
-                        MouseArea {
-                            id: closeMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: popup.settingsOpen = false
+                    MouseArea {
+                        id: closeMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            popup.settingsOpen = false;
+                            popup.settingsRestartHint = "";
                         }
                     }
                 }
+            }
 
-                // Break reminder section
+            // Scrollable settings content
+            Flickable {
+                id: settingsFlickable
+                anchors.top: settingsHeader.bottom
+                anchors.topMargin: 12
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 14
+                anchors.left: parent.left
+                anchors.right: parent.right
+                clip: true
+                contentWidth: width
+                contentHeight: settingsContent.implicitHeight
+                boundsBehavior: Flickable.StopAtBounds
+
+                ScrollBar.vertical: ScrollBar {
+                    policy: settingsFlickable.contentHeight > settingsFlickable.height
+                            ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                    width: 5
+                    contentItem: Rectangle {
+                        implicitWidth: 5
+                        radius: 2
+                        color: Qt.rgba(popup.watchedAccent.r, popup.watchedAccent.g, popup.watchedAccent.b, 0.65)
+                    }
+                    background: Rectangle {
+                        implicitWidth: 5
+                        radius: 2
+                        color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.14)
+                    }
+                }
+
                 ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
+                    id: settingsContent
+                    width: settingsFlickable.width * 0.78
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 18
+                    opacity: settingsOverlay.visible ? 1.0 : 0.0
+                    scale: settingsOverlay.visible ? 1.0 : 0.94
 
-                    RowLayout {
+                    Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                    Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutBack } }
+
+                    // ── Break reminder ────────────────────────────────────────
+                    ColumnLayout {
                         Layout.fillWidth: true
+                        spacing: 10
+
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Text {
+                                text: "Break reminder"
+                                color: popup.textColor
+                                font.family: popup.fontFamily
+                                font.pixelSize: 11
+                                font.bold: true
+                                Layout.fillWidth: true
+                            }
+                            Rectangle {
+                                id: enabledSwitch
+                                Layout.preferredWidth: 42
+                                Layout.preferredHeight: 22
+                                radius: 11
+                                color: popup.breaksEnabled ? popup.watchedAccent : Qt.darker(popup.bgSecondary, 1.4)
+                                border.width: 1
+                                border.color: popup.breaksEnabled ? popup.watchedAccent : popup.accentColor
+
+                                Behavior on color { ColorAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+                                Rectangle {
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: popup.bgColor
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: popup.breaksEnabled ? parent.width - width - 3 : 3
+                                    Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: popup.applyBreakSettings(!popup.breaksEnabled, popup.breakIntervalSecs, popup.breaksMinBreakSecs)
+                                }
+                            }
+                        }
 
                         Text {
-                            text: "Break reminder"
+                            text: "Prompt after"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 9
+                            opacity: popup.breaksEnabled ? 1.0 : 0.5
+                            Behavior on opacity { NumberAnimation { duration: 200 } }
+                        }
+                        Row {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            opacity: popup.breaksEnabled ? 1.0 : 0.5
+                            Behavior on opacity { NumberAnimation { duration: 200 } }
+
+                            Repeater {
+                                model: [
+                                    {label: "30m",  secs: 1800},
+                                    {label: "1h",   secs: 3600},
+                                    {label: "90m",  secs: 5400},
+                                    {label: "2h",   secs: 7200},
+                                    {label: "3h",   secs: 10800},
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool active: popup.breakIntervalSecs === modelData.secs
+                                    width: intervalLabel.implicitWidth + 18
+                                    height: 24
+                                    radius: 12
+                                    color: active
+                                        ? popup.watchedBg
+                                        : (intervalMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
+                                    border.width: 1
+                                    border.color: active ? popup.watchedAccent : popup.accentColor
+                                    scale: intervalMouse.pressed ? 0.94 : 1.0
+
+                                    Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                                    Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+
+                                    Text {
+                                        id: intervalLabel
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: active ? popup.watchedAccent : popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 10
+                                        font.bold: active
+                                    }
+                                    MouseArea {
+                                        id: intervalMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: popup.applyBreakSettings(popup.breaksEnabled, modelData.secs, popup.breaksMinBreakSecs)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Idle is a break after"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 9
+                            opacity: popup.breaksEnabled ? 1.0 : 0.5
+                            Behavior on opacity { NumberAnimation { duration: 200 } }
+                        }
+                        Row {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            opacity: popup.breaksEnabled ? 1.0 : 0.5
+                            Behavior on opacity { NumberAnimation { duration: 200 } }
+
+                            Repeater {
+                                model: [
+                                    {label: "2m",  secs: 120},
+                                    {label: "5m",  secs: 300},
+                                    {label: "10m", secs: 600},
+                                    {label: "15m", secs: 900},
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool active: popup.breaksMinBreakSecs === modelData.secs
+                                    width: minBreakLabel.implicitWidth + 18
+                                    height: 24
+                                    radius: 12
+                                    color: active
+                                        ? popup.watchedBg
+                                        : (minBreakMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
+                                    border.width: 1
+                                    border.color: active ? popup.watchedAccent : popup.accentColor
+                                    scale: minBreakMouse.pressed ? 0.94 : 1.0
+
+                                    Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                                    Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+
+                                    Text {
+                                        id: minBreakLabel
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: active ? popup.watchedAccent : popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 10
+                                        font.bold: active
+                                    }
+                                    MouseArea {
+                                        id: minBreakMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: popup.applyBreakSettings(popup.breaksEnabled, popup.breakIntervalSecs, modelData.secs)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Divider
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.2) }
+
+                    // ── Budgets ───────────────────────────────────────────────
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: (popup.categories || []).length > 0
+
+                        Text {
+                            text: "Budgets"
                             color: popup.textColor
                             font.family: popup.fontFamily
                             font.pixelSize: 11
                             font.bold: true
+                        }
+                        Text {
+                            text: "Minutes per day (0 = no limit)"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 9
+                        }
+
+                        Repeater {
+                            model: popup.categories || []
+                            delegate: RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                // Colour dot
+                                Rectangle {
+                                    width: 7; height: 7; radius: 3.5
+                                    color: popup.categoryColor(modelData.name)
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+
+                                Text {
+                                    text: modelData.name
+                                    color: popup.textColor
+                                    font.family: popup.fontFamily
+                                    font.pixelSize: 10
+                                    Layout.fillWidth: true
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: 52
+                                    Layout.preferredHeight: 22
+                                    radius: 4
+                                    color: Qt.darker(popup.bgSecondary, 1.3)
+                                    border.width: 1
+                                    border.color: popup.accentColor
+
+                                    TextInput {
+                                        id: budgetInput
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 6
+                                        anchors.rightMargin: 6
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        color: popup.textColor
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 10
+                                        inputMethodHints: Qt.ImhDigitsOnly
+                                        // Pre-fill from current budget (budget_secs / 60, rounded)
+                                        text: (modelData.budget_secs && modelData.budget_secs > 0)
+                                              ? String(Math.round(modelData.budget_secs / 60)) : ""
+                                        selectByMouse: true
+                                        validator: IntValidator { bottom: 0; top: 9999 }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: budgetSaveLabel.implicitWidth + 14
+                                    Layout.preferredHeight: 22
+                                    radius: 11
+                                    color: budgetSaveMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.2) : popup.bgSecondary
+                                    border.width: 1
+                                    border.color: popup.accentColor
+
+                                    Behavior on color { ColorAnimation { duration: 120 } }
+
+                                    Text {
+                                        id: budgetSaveLabel
+                                        anchors.centerIn: parent
+                                        text: "Save"
+                                        color: popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 9
+                                    }
+                                    MouseArea {
+                                        id: budgetSaveMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            var mins = parseInt(budgetInput.text) || 0;
+                                            attnSetBudget.budgetCategory = modelData.name;
+                                            attnSetBudget.budgetSecs = mins * 60;
+                                            attnSetBudget.running = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Divider
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.2) }
+
+                    // ── Notifications ─────────────────────────────────────────
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "Notifications"
+                            color: popup.textColor
+                            font.family: popup.fontFamily
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+
+                        Repeater {
+                            model: [
+                                { label: "Enable notifications",  field: "enabled" },
+                                { label: "Break-overdue alerts",  field: "breakOverdue" },
+                                { label: "Budget-exceeded alerts", field: "budgetExceeded" },
+                            ]
+                            delegate: RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                readonly property bool fieldValue: {
+                                    switch (modelData.field) {
+                                        case "enabled":       return popup.notificationsEnabled;
+                                        case "breakOverdue":  return popup.notificationsBreakOverdue;
+                                        case "budgetExceeded":return popup.notificationsBudgetExceeded;
+                                        default: return false;
+                                    }
+                                }
+
+                                Text {
+                                    text: modelData.label
+                                    color: popup.textColor
+                                    font.family: popup.fontFamily
+                                    font.pixelSize: 10
+                                    Layout.fillWidth: true
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: 42
+                                    Layout.preferredHeight: 22
+                                    radius: 11
+                                    color: fieldValue ? popup.watchedAccent : Qt.darker(popup.bgSecondary, 1.4)
+                                    border.width: 1
+                                    border.color: fieldValue ? popup.watchedAccent : popup.accentColor
+
+                                    Behavior on color { ColorAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+                                    Rectangle {
+                                        width: 16; height: 16; radius: 8
+                                        color: popup.bgColor
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        x: fieldValue ? parent.width - width - 3 : 3
+                                        Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            var e = popup.notificationsEnabled;
+                                            var b = popup.notificationsBreakOverdue;
+                                            var u = popup.notificationsBudgetExceeded;
+                                            switch (modelData.field) {
+                                                case "enabled":        e = !e; break;
+                                                case "breakOverdue":   b = !b; break;
+                                                case "budgetExceeded": u = !u; break;
+                                            }
+                                            popup.applyNotificationSettings(e, b, u);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Divider
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(popup.accentColor.r, popup.accentColor.g, popup.accentColor.b, 0.2) }
+
+                    // ── Compositor / Focus source ─────────────────────────────
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "Compositor"
+                            color: popup.textColor
+                            font.family: popup.fontFamily
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+                        Text {
+                            text: "Focus source (requires daemon restart)"
+                            color: popup.textDim
+                            font.family: popup.fontFamily
+                            font.pixelSize: 9
+                        }
+
+                        Row {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: ["auto", "niri", "hyprland", "river", "sway"]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool active: popup.focusSourceKind === modelData
+                                    width: fsLabel.implicitWidth + 14
+                                    height: 24
+                                    radius: 12
+                                    color: active
+                                        ? popup.watchedBg
+                                        : (fsMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
+                                    border.width: 1
+                                    border.color: active ? popup.watchedAccent : popup.accentColor
+                                    scale: fsMouse.pressed ? 0.94 : 1.0
+
+                                    Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                                    Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+
+                                    Text {
+                                        id: fsLabel
+                                        anchors.centerIn: parent
+                                        text: modelData
+                                        color: active ? popup.watchedAccent : popup.textDim
+                                        font.family: popup.fontFamily
+                                        font.pixelSize: 10
+                                        font.bold: active
+                                    }
+                                    MouseArea {
+                                        id: fsMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: popup.applyFocusSource(modelData)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: popup.settingsRestartHint !== ""
+                            text: popup.settingsRestartHint
+                            color: popup.watchedAccent
+                            font.family: popup.fontFamily
+                            font.pixelSize: 9
+                            wrapMode: Text.WordWrap
                             Layout.fillWidth: true
                         }
-                        Rectangle {
-                            id: enabledSwitch
-                            Layout.preferredWidth: 42
-                            Layout.preferredHeight: 22
-                            radius: 11
-                            color: popup.breaksEnabled ? popup.watchedAccent : Qt.darker(popup.bgSecondary, 1.4)
-                            border.width: 1
-                            border.color: popup.breaksEnabled ? popup.watchedAccent : popup.accentColor
-
-                            Behavior on color { ColorAnimation { duration: 180; easing.type: Easing.OutCubic } }
-
-                            Rectangle {
-                                width: 16
-                                height: 16
-                                radius: 8
-                                color: popup.bgColor
-                                anchors.verticalCenter: parent.verticalCenter
-                                x: popup.breaksEnabled ? parent.width - width - 3 : 3
-                                Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: popup.applyBreakSettings(!popup.breaksEnabled, popup.breakIntervalSecs, popup.breaksMinBreakSecs)
-                            }
-                        }
                     }
 
+                    // Footer hint
                     Text {
-                        text: "Prompt after"
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        text: "Edit ~/.config/attn/config.toml for watch lists.\nDaemon auto-reloads on save."
                         color: popup.textDim
                         font.family: popup.fontFamily
                         font.pixelSize: 9
-                        opacity: popup.breaksEnabled ? 1.0 : 0.5
-                        Behavior on opacity { NumberAnimation { duration: 200 } }
+                        wrapMode: Text.WordWrap
+                        bottomPadding: 4
                     }
-                    Row {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        opacity: popup.breaksEnabled ? 1.0 : 0.5
-                        Behavior on opacity { NumberAnimation { duration: 200 } }
-
-                        Repeater {
-                            model: [
-                                {label: "30m",  secs: 1800},
-                                {label: "1h",   secs: 3600},
-                                {label: "90m",  secs: 5400},
-                                {label: "2h",   secs: 7200},
-                                {label: "3h",   secs: 10800},
-                            ]
-                            delegate: Rectangle {
-                                required property var modelData
-                                readonly property bool active: popup.breakIntervalSecs === modelData.secs
-                                width: intervalLabel.implicitWidth + 18
-                                height: 24
-                                radius: 12
-                                color: active
-                                    ? popup.watchedBg
-                                    : (intervalMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
-                                border.width: 1
-                                border.color: active ? popup.watchedAccent : popup.accentColor
-                                scale: intervalMouse.pressed ? 0.94 : 1.0
-
-                                Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                                Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
-
-                                Text {
-                                    id: intervalLabel
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: active ? popup.watchedAccent : popup.textDim
-                                    font.family: popup.fontFamily
-                                    font.pixelSize: 10
-                                    font.bold: active
-                                }
-                                MouseArea {
-                                    id: intervalMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: popup.applyBreakSettings(popup.breaksEnabled, modelData.secs, popup.breaksMinBreakSecs)
-                                }
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "Idle is a break after"
-                        color: popup.textDim
-                        font.family: popup.fontFamily
-                        font.pixelSize: 9
-                        opacity: popup.breaksEnabled ? 1.0 : 0.5
-                        Behavior on opacity { NumberAnimation { duration: 200 } }
-                    }
-                    Row {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        opacity: popup.breaksEnabled ? 1.0 : 0.5
-                        Behavior on opacity { NumberAnimation { duration: 200 } }
-
-                        Repeater {
-                            model: [
-                                {label: "2m",  secs: 120},
-                                {label: "5m",  secs: 300},
-                                {label: "10m", secs: 600},
-                                {label: "15m", secs: 900},
-                            ]
-                            delegate: Rectangle {
-                                required property var modelData
-                                readonly property bool active: popup.breaksMinBreakSecs === modelData.secs
-                                width: minBreakLabel.implicitWidth + 18
-                                height: 24
-                                radius: 12
-                                color: active
-                                    ? popup.watchedBg
-                                    : (minBreakMouse.containsMouse ? Qt.lighter(popup.bgSecondary, 1.15) : popup.bgSecondary)
-                                border.width: 1
-                                border.color: active ? popup.watchedAccent : popup.accentColor
-                                scale: minBreakMouse.pressed ? 0.94 : 1.0
-
-                                Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                                Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
-
-                                Text {
-                                    id: minBreakLabel
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: active ? popup.watchedAccent : popup.textDim
-                                    font.family: popup.fontFamily
-                                    font.pixelSize: 10
-                                    font.bold: active
-                                }
-                                MouseArea {
-                                    id: minBreakMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: popup.applyBreakSettings(popup.breaksEnabled, popup.breakIntervalSecs, modelData.secs)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    text: "Edit ~/.config/attn/config.toml for watch lists.\nDaemon auto-reloads on save."
-                    color: popup.textDim
-                    font.family: popup.fontFamily
-                    font.pixelSize: 9
-                    wrapMode: Text.WordWrap
                 }
             }
         }

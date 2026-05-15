@@ -30,6 +30,10 @@ Item {
     property int breaksMinBreakSecs: 300
     property var uncategorizedApps: []
     property var uncategorizedDomains: []
+    property bool notificationsEnabled: true
+    property bool notificationsBreakOverdue: true
+    property bool notificationsBudgetExceeded: true
+    property string focusSourceKind: "auto"
 
     signal clicked()
 
@@ -96,6 +100,10 @@ Item {
                     if (status.breaks_min_break_secs !== undefined) root.breaksMinBreakSecs = Number(status.breaks_min_break_secs);
                     root.uncategorizedApps = status.uncategorized_apps || [];
                     root.uncategorizedDomains = status.uncategorized_domains || [];
+                    if (status.notifications_enabled !== undefined) root.notificationsEnabled = !!status.notifications_enabled;
+                    if (status.notifications_break_overdue !== undefined) root.notificationsBreakOverdue = !!status.notifications_break_overdue;
+                    if (status.notifications_budget_exceeded !== undefined) root.notificationsBudgetExceeded = !!status.notifications_budget_exceeded;
+                    if (status.focus_source_kind !== undefined) root.focusSourceKind = String(status.focus_source_kind);
                     root.stale = false;
                 } catch (e) {
                     root.stale = true;

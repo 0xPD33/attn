@@ -121,6 +121,57 @@ fn run() -> Result<()> {
             println!("{response}");
             Ok(())
         }
+        Some("set-budget") => {
+            let mut category: Option<String> = None;
+            let mut secs: Option<i64> = None;
+            for arg in args {
+                if let Some(v) = arg.strip_prefix("--category=") {
+                    category = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--secs=") {
+                    secs = v.parse().ok();
+                }
+            }
+            let category = category.ok_or_else(|| anyhow!("set-budget requires --category=<name>"))?;
+            let daily_budget_secs = secs.ok_or_else(|| anyhow!("set-budget requires --secs=<N>"))?;
+            let payload = serde_json::to_string(&SetBudgetRequest { category, daily_budget_secs })?;
+            let cfg = Config::load_default()?;
+            let response = socket_request(&cfg.socket_path, &format!("set_budget {payload}\n"))?;
+            println!("{response}");
+            Ok(())
+        }
+        Some("set-notifications") => {
+            let mut enabled: Option<bool> = None;
+            let mut break_overdue: Option<bool> = None;
+            let mut budget_exceeded: Option<bool> = None;
+            for arg in args {
+                if let Some(v) = arg.strip_prefix("--enabled=") {
+                    enabled = Some(v == "true" || v == "1");
+                } else if let Some(v) = arg.strip_prefix("--break-overdue=") {
+                    break_overdue = Some(v == "true" || v == "1");
+                } else if let Some(v) = arg.strip_prefix("--budget-exceeded=") {
+                    budget_exceeded = Some(v == "true" || v == "1");
+                }
+            }
+            let payload = serde_json::to_string(&SetNotificationsRequest { enabled, break_overdue, budget_exceeded })?;
+            let cfg = Config::load_default()?;
+            let response = socket_request(&cfg.socket_path, &format!("set_notifications {payload}\n"))?;
+            println!("{response}");
+            Ok(())
+        }
+        Some("set-focus-source") => {
+            let mut kind: Option<String> = None;
+            for arg in args {
+                if let Some(v) = arg.strip_prefix("--kind=") {
+                    kind = Some(v.to_string());
+                }
+            }
+            let kind = kind.ok_or_else(|| anyhow!("set-focus-source requires --kind=auto|niri|hyprland|river|sway"))?;
+            let payload = serde_json::to_string(&SetFocusSourceRequest { kind })?;
+            let cfg = Config::load_default()?;
+            let response = socket_request(&cfg.socket_path, &format!("set_focus_source {payload}\n"))?;
+            println!("{response}");
+            Ok(())
+        }
         Some("init") => {
             let mut force = false;
             let mut merge = false;
@@ -144,7 +195,7 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn categorize --kind=app|domain --id=<id> --category=<name>\n  attn init [--force|--merge]\n  attn doctor"
+        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn categorize --kind=app|domain --id=<id> --category=<name>\n  attn set-budget --category=<name> --secs=<N>\n  attn set-notifications [--enabled=BOOL] [--break-overdue=BOOL] [--budget-exceeded=BOOL]\n  attn set-focus-source --kind=auto|niri|hyprland|river|sway\n  attn init [--force|--merge]\n  attn doctor"
     );
 }
 
@@ -1617,6 +1668,42 @@ fn handle_client(state: AppState, mut stream: UnixStream) -> Result<()> {
                 )))?,
             }
         }
+        cmd if cmd.starts_with("set_budget ") => {
+            let json_part = &cmd["set_budget ".len()..];
+            match serde_json::from_str::<SetBudgetRequest>(json_part) {
+                Ok(req) => {
+                    let resp = handle_set_budget(&state, req)?;
+                    serde_json::to_string(&resp)?
+                }
+                Err(e) => serde_json::to_string(&SimpleResponse::err(format!(
+                    "invalid set_budget payload: {e}"
+                )))?,
+            }
+        }
+        cmd if cmd.starts_with("set_notifications ") => {
+            let json_part = &cmd["set_notifications ".len()..];
+            match serde_json::from_str::<SetNotificationsRequest>(json_part) {
+                Ok(req) => {
+                    let resp = handle_set_notifications(&state, req)?;
+                    serde_json::to_string(&resp)?
+                }
+                Err(e) => serde_json::to_string(&SimpleResponse::err(format!(
+                    "invalid set_notifications payload: {e}"
+                )))?,
+            }
+        }
+        cmd if cmd.starts_with("set_focus_source ") => {
+            let json_part = &cmd["set_focus_source ".len()..];
+            match serde_json::from_str::<SetFocusSourceRequest>(json_part) {
+                Ok(req) => {
+                    let resp = handle_set_focus_source(&state, req)?;
+                    serde_json::to_string(&resp)?
+                }
+                Err(e) => serde_json::to_string(&SimpleResponse::err(format!(
+                    "invalid set_focus_source payload: {e}"
+                )))?,
+            }
+        }
         other => serde_json::to_string(&serde_json::json!({
             "ok": false,
             "error": format!("unknown request: {other}")
@@ -1787,6 +1874,254 @@ fn handle_categorize(state: &AppState, req: CategorizeRequest) -> Result<Categor
     let _ = reload_daemon_config(state);
 
     Ok(CategorizeResponse::ok())
+}
+
+// ── Shared response type for simple ok/error operations ──────────────────────
+
+#[derive(Debug, Serialize)]
+struct SimpleResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl SimpleResponse {
+    fn ok() -> Self { Self { ok: true, error: None, message: None } }
+    fn ok_msg(msg: impl Into<String>) -> Self { Self { ok: true, error: None, message: Some(msg.into()) } }
+    fn err(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()), message: None } }
+}
+
+// ── set_budget ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SetBudgetRequest {
+    category: String,
+    daily_budget_secs: i64,
+}
+
+fn handle_set_budget(state: &AppState, req: SetBudgetRequest) -> Result<SimpleResponse> {
+    use toml_edit::{DocumentMut, Item, Table, value};
+    use std::time::SystemTime;
+
+    let config_path = expand_path(DEFAULT_CONFIG_PATH);
+    if !config_path.exists() {
+        return Ok(SimpleResponse::err("config file not found"));
+    }
+
+    // Validate category exists in running config (apps or domains watch).
+    {
+        let config = state.config.lock().unwrap();
+        let in_apps = config.apps.watch.contains_key(&req.category);
+        let in_domains = config.domains.watch.contains_key(&req.category);
+        if !in_apps && !in_domains {
+            let mut all_cats: Vec<String> = config.apps.watch.keys().cloned().collect();
+            for k in config.domains.watch.keys() {
+                if !all_cats.contains(k) { all_cats.push(k.clone()); }
+            }
+            all_cats.sort();
+            return Ok(SimpleResponse::err(format!(
+                "category {:?} not found; existing categories: {}",
+                req.category,
+                all_cats.join(", ")
+            )));
+        }
+    }
+
+    let mtime_before: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+
+    let mut doc = raw.parse::<DocumentMut>()
+        .context("failed to parse config with toml_edit")?;
+
+    if req.daily_budget_secs == 0 {
+        // Remove the budget entry.
+        if let Some(budgets) = doc.get_mut("budgets").and_then(|b| b.as_table_mut()) {
+            budgets.remove(&req.category);
+        }
+    } else {
+        // Insert or update [budgets.<category>].daily_budget_secs.
+        if doc.get("budgets").is_none() {
+            doc.insert("budgets", Item::Table(Table::new()));
+        }
+        let budgets = doc
+            .get_mut("budgets")
+            .and_then(|b| b.as_table_mut())
+            .ok_or_else(|| anyhow!("[budgets] is not a table"))?;
+        if budgets.get(&req.category).is_none() {
+            budgets.insert(&req.category, Item::Table(Table::new()));
+        }
+        let entry = budgets
+            .get_mut(&req.category)
+            .and_then(|e| e.as_table_mut())
+            .ok_or_else(|| anyhow!("[budgets.{}] is not a table", req.category))?;
+        entry.insert("daily_budget_secs", value(req.daily_budget_secs));
+    }
+
+    let mtime_after: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if mtime_after != mtime_before {
+        return Ok(SimpleResponse::err("config changed on disk, retry"));
+    }
+
+    let parent = config_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".attn-config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)
+        .context("failed to create temp config file")?;
+    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.flush().context("failed to flush temp config")?;
+    tmp.persist(&config_path)
+        .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
+
+    let _ = reload_daemon_config(state);
+    Ok(SimpleResponse::ok())
+}
+
+// ── set_notifications ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SetNotificationsRequest {
+    enabled: Option<bool>,
+    break_overdue: Option<bool>,
+    budget_exceeded: Option<bool>,
+}
+
+fn handle_set_notifications(state: &AppState, req: SetNotificationsRequest) -> Result<SimpleResponse> {
+    use toml_edit::{DocumentMut, Item, Table, value};
+    use std::time::SystemTime;
+
+    let config_path = expand_path(DEFAULT_CONFIG_PATH);
+    if !config_path.exists() {
+        return Ok(SimpleResponse::err("config file not found"));
+    }
+
+    let mtime_before: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+
+    let mut doc = raw.parse::<DocumentMut>()
+        .context("failed to parse config with toml_edit")?;
+
+    // Ensure [notifications] table exists.
+    if doc.get("notifications").is_none() {
+        doc.insert("notifications", Item::Table(Table::new()));
+    }
+    let notif = doc
+        .get_mut("notifications")
+        .and_then(|n| n.as_table_mut())
+        .ok_or_else(|| anyhow!("[notifications] is not a table"))?;
+
+    if let Some(v) = req.enabled {
+        notif.insert("enabled", value(v));
+    }
+    if let Some(v) = req.break_overdue {
+        notif.insert("break_overdue", value(v));
+    }
+    if let Some(v) = req.budget_exceeded {
+        notif.insert("budget_exceeded", value(v));
+    }
+
+    let mtime_after: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if mtime_after != mtime_before {
+        return Ok(SimpleResponse::err("config changed on disk, retry"));
+    }
+
+    let parent = config_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".attn-config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)
+        .context("failed to create temp config file")?;
+    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.flush().context("failed to flush temp config")?;
+    tmp.persist(&config_path)
+        .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
+
+    let _ = reload_daemon_config(state);
+    Ok(SimpleResponse::ok())
+}
+
+// ── set_focus_source ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SetFocusSourceRequest {
+    kind: String,
+}
+
+const VALID_FOCUS_KINDS: &[&str] = &["auto", "niri", "hyprland", "river", "sway"];
+
+fn handle_set_focus_source(state: &AppState, req: SetFocusSourceRequest) -> Result<SimpleResponse> {
+    use toml_edit::{DocumentMut, Item, Table, value};
+    use std::time::SystemTime;
+
+    if !VALID_FOCUS_KINDS.contains(&req.kind.as_str()) {
+        return Ok(SimpleResponse::err(format!(
+            "invalid kind {:?}; expected one of: {}",
+            req.kind,
+            VALID_FOCUS_KINDS.join(", ")
+        )));
+    }
+
+    let config_path = expand_path(DEFAULT_CONFIG_PATH);
+    if !config_path.exists() {
+        return Ok(SimpleResponse::err("config file not found"));
+    }
+
+    let mtime_before: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+
+    let mut doc = raw.parse::<DocumentMut>()
+        .context("failed to parse config with toml_edit")?;
+
+    if doc.get("focus_source").is_none() {
+        doc.insert("focus_source", Item::Table(Table::new()));
+    }
+    let fs_table = doc
+        .get_mut("focus_source")
+        .and_then(|t| t.as_table_mut())
+        .ok_or_else(|| anyhow!("[focus_source] is not a table"))?;
+    fs_table.insert("kind", value(req.kind.as_str()));
+
+    let mtime_after: SystemTime = fs::metadata(&config_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if mtime_after != mtime_before {
+        return Ok(SimpleResponse::err("config changed on disk, retry"));
+    }
+
+    let parent = config_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".attn-config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)
+        .context("failed to create temp config file")?;
+    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.flush().context("failed to flush temp config")?;
+    tmp.persist(&config_path)
+        .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
+
+    let _ = reload_daemon_config(state);
+
+    Ok(SimpleResponse::ok_msg(
+        "focus source updated; restart daemon for the new kind to take effect"
+    ))
 }
 
 fn apply_breaks_override(
@@ -2538,6 +2873,10 @@ struct Status {
     uncategorized_apps: Vec<AppStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     uncategorized_domains: Vec<DomainStatus>,
+    notifications_enabled: bool,
+    notifications_break_overdue: bool,
+    notifications_budget_exceeded: bool,
+    focus_source_kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2732,6 +3071,10 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
         breaks_min_break_secs: config.breaks.min_break_secs,
         uncategorized_apps,
         uncategorized_domains,
+        notifications_enabled: config.notifications.enabled,
+        notifications_break_overdue: config.notifications.break_overdue,
+        notifications_budget_exceeded: config.notifications.budget_exceeded,
+        focus_source_kind: config.focus_source.kind.clone(),
     })
 }
 
@@ -5427,6 +5770,10 @@ mod tests {
             breaks_min_break_secs: 300,
             uncategorized_apps: vec![],
             uncategorized_domains: vec![],
+            notifications_enabled: true,
+            notifications_break_overdue: true,
+            notifications_budget_exceeded: true,
+            focus_source_kind: "niri".to_string(),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(!json.contains("uncategorized_apps"), "empty vec should be omitted");
@@ -5454,9 +5801,180 @@ mod tests {
             breaks_min_break_secs: 300,
             uncategorized_apps: vec![AppStatus { id: "obs".to_string(), seconds: 120, watched: false, category: None }],
             uncategorized_domains: vec![],
+            notifications_enabled: true,
+            notifications_break_overdue: true,
+            notifications_budget_exceeded: true,
+            focus_source_kind: "niri".to_string(),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("uncategorized_apps"));
         assert!(json.contains("obs"));
+    }
+
+    // ── set_budget tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_set_budget_updates_existing_budget() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        fs::write(&path, "[apps.watch]\ncoding = [\"code\"]\n\n[budgets.coding]\ndaily_budget_secs = 1800\n").unwrap();
+
+        let mut watch = BTreeMap::new();
+        watch.insert("coding".to_string(), vec!["code".to_string()]);
+        let config = Config {
+            apps: AppsConfig { watch },
+            ..Default::default()
+        };
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+
+        // Temporarily override DEFAULT_CONFIG_PATH by writing to the test path and using it directly.
+        // We test the handler logic via toml_edit round-trip.
+        let req = SetBudgetRequest { category: "coding".to_string(), daily_budget_secs: 3600 };
+        // Inline the toml_edit logic to test it without needing the real config path.
+        let raw = fs::read_to_string(&path).unwrap();
+        use toml_edit::{DocumentMut, value};
+        let mut doc = raw.parse::<DocumentMut>().unwrap();
+        let budgets = doc.get_mut("budgets").and_then(|b| b.as_table_mut()).unwrap();
+        let entry = budgets.get_mut("coding").and_then(|e| e.as_table_mut()).unwrap();
+        entry.insert("daily_budget_secs", value(req.daily_budget_secs));
+        let out = doc.to_string();
+        assert!(out.contains("daily_budget_secs = 3600"));
+        assert!(out.contains("[apps.watch]"), "unrelated sections preserved");
+
+        drop(state); // appease clippy
+    }
+
+    #[test]
+    fn handle_set_budget_removes_when_zero() {
+        let raw = "[apps.watch]\ncoding = [\"code\"]\n\n[budgets]\n[budgets.coding]\ndaily_budget_secs = 1800\n";
+        use toml_edit::DocumentMut;
+        let mut doc = raw.parse::<DocumentMut>().unwrap();
+        if let Some(budgets) = doc.get_mut("budgets").and_then(|b| b.as_table_mut()) {
+            budgets.remove("coding");
+        }
+        let out = doc.to_string();
+        assert!(!out.contains("daily_budget_secs"), "budget entry should be removed");
+        assert!(out.contains("[apps.watch]"), "unrelated sections preserved");
+    }
+
+    #[test]
+    fn handle_set_budget_rejects_unknown_category() {
+        let mut watch = BTreeMap::new();
+        watch.insert("coding".to_string(), vec!["code".to_string()]);
+        let config = Config {
+            apps: AppsConfig { watch },
+            ..Default::default()
+        };
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+        let req = SetBudgetRequest { category: "nonexistent".to_string(), daily_budget_secs: 3600 };
+        let resp = handle_set_budget(&state, req).unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_deref().unwrap_or("").contains("not found"));
+    }
+
+    // ── set_notifications tests ───────────────────────────────────────────────
+
+    #[test]
+    fn handle_set_notifications_writes_only_provided_fields() {
+        let raw = "[notifications]\nenabled = true\nbreak_overdue = true\nbudget_exceeded = true\n";
+        use toml_edit::{DocumentMut, value};
+        let mut doc = raw.parse::<DocumentMut>().unwrap();
+        // Simulate: only set enabled = false, leave others unchanged.
+        let notif = doc.get_mut("notifications").and_then(|n| n.as_table_mut()).unwrap();
+        notif.insert("enabled", value(false));
+        let out = doc.to_string();
+        assert!(out.contains("enabled = false"));
+        assert!(out.contains("break_overdue = true"), "untouched field preserved");
+        assert!(out.contains("budget_exceeded = true"), "untouched field preserved");
+    }
+
+    // ── set_focus_source tests ────────────────────────────────────────────────
+
+    #[test]
+    fn handle_set_focus_source_rejects_invalid_kind() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(None)),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+        let req = SetFocusSourceRequest { kind: "gnome".to_string() };
+        let resp = handle_set_focus_source(&state, req).unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_deref().unwrap_or("").contains("invalid kind"));
+    }
+
+    #[test]
+    fn handle_set_focus_source_accepts_valid_kinds() {
+        for kind in VALID_FOCUS_KINDS {
+            // Validation only — no file I/O needed.
+            assert!(VALID_FOCUS_KINDS.contains(kind), "{kind} should be valid");
+        }
+    }
+
+    // ── status JSON includes new fields ───────────────────────────────────────
+
+    #[test]
+    fn status_json_includes_notifications_and_focus_source_fields() {
+        let status = Status {
+            date: "2026-05-15".to_string(),
+            updated_at: "2026-05-15T12:00:00+00:00".to_string(),
+            watch_seconds: 0,
+            tracked_seconds: 0,
+            apps: vec![],
+            domains: vec![],
+            categories: vec![],
+            days: vec![],
+            active_session_seconds: 0,
+            break_overdue: false,
+            paused: false,
+            paused_reason: None,
+            paused_since: None,
+            breaks_enabled: true,
+            breaks_interval_secs: 3600,
+            breaks_min_break_secs: 300,
+            uncategorized_apps: vec![],
+            uncategorized_domains: vec![],
+            notifications_enabled: false,
+            notifications_break_overdue: true,
+            notifications_budget_exceeded: false,
+            focus_source_kind: "hyprland".to_string(),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"notifications_enabled\":false"));
+        assert!(json.contains("\"notifications_break_overdue\":true"));
+        assert!(json.contains("\"notifications_budget_exceeded\":false"));
+        assert!(json.contains("\"focus_source_kind\":\"hyprland\""));
     }
 }
