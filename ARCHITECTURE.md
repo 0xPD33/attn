@@ -7,13 +7,14 @@ The single design principle is that **focused application time is the source of 
 ## System shape
 
 ```
-Niri focus events ────┐
-Terminal-subprocess   │
-   resolution ────────┤
-Browser history ──────┤
-Wayland idle-notify ──┼──► attn daemon ──► SQLite ledger
-D-Bus PrepareForSleep ┘                    │
-                                           └──► Unix socket ──► attn status --json ──► Quickshell
+Compositor focus events ─┐    (niri / Hyprland / Sway / river)
+Terminal-subprocess      │
+   resolution ───────────┤
+Browser history ─────────┤    (Chromium-family + Firefox-family)
+Wayland idle-notify ─────┼──► attn daemon ──► SQLite ledger
+D-Bus PrepareForSleep ───┘                     │
+                                               ├──► Unix socket ──► attn status --json ──► Quickshell
+                                               └──► D-Bus Notifications (break-overdue, budget-exceeded)
 ```
 
 The daemon owns all measurement, persistence, attribution, and aggregation. Quickshell only displays already-computed status. Home Manager only deploys binary, config, and the user service.
@@ -26,7 +27,7 @@ Long-running user process. Started on graphical session login via `systemd.user.
 
 Threads:
 
-- **Main / focus loop**: subscribes to `niri msg -j event-stream`, handles `WindowFocusChanged` / `WorkspaceActiveWindowChanged` / `WorkspaceActivated` / `WorkspacesChanged` events. On each event, closes the previously open interval and opens a new one for the now-focused window.
+- **Main / focus loop**: dispatched through the `FocusSource` trait, with one of four adapters (niri / Hyprland / Sway / river) chosen by `focus_source.kind` (default `auto`). The niri adapter consumes `niri msg -j event-stream` and handles `WindowFocusChanged` / `WorkspaceActiveWindowChanged` / `WorkspaceActivated` / `WorkspacesChanged` events. The Hyprland adapter reads the socket2 event stream and re-queries `hyprctl -j activewindow`. The wlr-foreign-toplevel adapter (Sway, river) tracks `activated` state per toplevel. On each focus change, the daemon closes the previously open interval and opens a new one for the now-focused window.
 - **Terminal poll** (`terminals.poll_secs`, default 10 s): re-runs focus resolution. Catches the case where the focused window is unchanged but a new program launched inside it (e.g. you started `claude` inside an already-focused terminal).
 - **Browser import** (`poll_interval_secs`, default 60 s): runs the browser history pipeline (snapshot → read → clip → write).
 - **Socket server**: per-connection threads serving `status`, `reload`, `break_start`, `break_end`, `set_breaks` requests on `$XDG_RUNTIME_DIR/attn.sock`.
@@ -46,11 +47,13 @@ Single binary, multiple subcommands:
 attn daemon              run the long-running collector
 attn status --json       print current-day + 7-day status from the socket
 attn reload              ask the daemon to reload config without restarting
-attn init [--force]      write the default config to ~/.config/attn/config.toml
-attn doctor              check niri, config, state DB, wayland, dbus, browsers, socket
+attn init [--force|--merge]
+                         write or merge the default config at ~/.config/attn/config.toml
+attn doctor              check compositor IPC, config, state DB, wayland, dbus, browsers, notifications, socket
 attn break-start         pause tracking manually
 attn break-end           resume tracking
 attn set-breaks [...]    update break-reminder settings without editing TOML
+attn categorize          assign an uncategorized app/domain to a category (writes config.toml)
 ```
 
 The CLI hides socket protocol details from Quickshell and shell scripts.
@@ -126,15 +129,21 @@ The widget is pure presentation. It does not read SQLite, does not classify watc
 
 ## Focus tracking
 
-### Layer 1: niri events
+### Layer 1: compositor focus events
 
-The daemon subscribes to `niri msg -j event-stream` and reacts to focus-change events. On each event it queries `niri msg -j focused-window` and extracts `app_id`, `title`, and `pid`.
+The daemon dispatches to one of four `FocusSource` adapters based on `focus_source.kind`:
+
+- **niri**: subscribes to `niri msg -j event-stream` and re-queries `niri msg -j focused-window` on each focus event.
+- **Hyprland**: reads `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock` for `activewindow` events and re-queries via `hyprctl -j activewindow`.
+- **wlr-foreign-toplevel** (Sway, river): binds `zwlr_foreign_toplevel_manager_v1` and tracks the `activated` state per toplevel via `wayland-client`.
+
+Each adapter normalizes to a `FocusedWindow` struct with `app_id`, `title`, `pid`, and an optional `window_id`.
 
 ### Layer 2: terminal subprocess resolution
 
 If the focused window is a terminal emulator (matched against `apps.watch.terminal`), the daemon attempts to identify the active program running inside it. Three strategies, in order:
 
-1. **Title match**. The niri-reported window title is scanned for any program name configured under `[terminals.apps]`. Bounded-word matching is used so `clauderyx` does not match `claude`. Modern terminals set the OSC 0/2 title to the foreground program's argv0; this path is fast and high-confidence.
+1. **Title match**. The compositor-reported window title is scanned for any program name configured under `[terminals.apps]`. Bounded-word matching is used so `clauderyx` does not match `claude`. Modern terminals set the OSC 0/2 title to the foreground program's argv0; this path is fast and high-confidence.
 2. **Tmux query**. If a tmux client process is found in the focused window's descendant tree, `tmux list-clients` is invoked. The matching client's `pane_current_command` is checked against `[terminals.apps]`. This handles the common case of running tmux inside a terminal. Without tmux running, this path is skipped.
 3. **Descendant scan**. Walk `/proc/<pid>/task/*/children` recursively from the focused window's pid, collecting basenames and start-times. The most recently started subprocess matching `[terminals.apps]` wins.
 
@@ -302,7 +311,7 @@ The daemon is intended to run continuously at near-zero cost.
 
 Hot paths:
 
-- Niri event handling is event-driven, not polled.
+- Focus-source event handling is event-driven (niri, Hyprland, wlr-toplevel all surface focus changes as events), not polled.
 - Status responses are served from `daily_*_totals` and gated by the 3 s rebuild cooldown, typically ~1 ms after the first call.
 - Browser history scanning runs on a timer (default 60 s), not per status request.
 - Live browser DB connections are open only long enough to copy the file.
@@ -323,9 +332,10 @@ Steady-state memory is ~40 MB and CPU is ~0% between focus events.
 
 | Failure | Behavior |
 |---------|----------|
-| Niri IPC unavailable at startup | Daemon retries after a short delay; app tracking pauses meanwhile. |
-| Browser profile missing or History unreadable | Skipped for this poll cycle. Logged. App tracking continues. |
-| Browser History schema differs from Chromium layout | Skipped. Logged. |
+| Compositor IPC unavailable at startup | Daemon retries after a short delay; app tracking pauses meanwhile. |
+| Browser profile missing or History/places.sqlite unreadable | Skipped for this poll cycle. Logged. App tracking continues. |
+| Browser History schema differs from the configured `kind` layout | Skipped. Logged. |
+| D-Bus notification daemon absent | Break-overdue and budget-exceeded notifications silently no-op; popup chip + banner still surface the state. `attn doctor` reports the missing daemon. |
 | Config has a bad watch-list entry | Default values fall back in. Logged. |
 | Wayland `ext-idle-notify-v1` unavailable | Auto-pause-on-idle disabled. Manual break-start/break-end still work. `attn doctor` reports it. |
 | D-Bus `org.freedesktop.login1` unreachable | Suspend/wake detection falls back to the heartbeat thread's retroactive-cap path. Logged. |
@@ -344,11 +354,9 @@ V1 reports the current local day plus the previous 6 days. All stored timestamps
 
 Deliberately deferred:
 
-- Zen / Firefox `places.sqlite` reader.
 - Per-tab active-URL tracking via a browser extension.
-- Sway / Hyprland / KWin focus providers (V1 is niri-only).
+- KDE Plasma / GNOME Shell focus providers (Niri / Hyprland / Sway / river ship in v0.2).
 - Monthly aggregates.
-- Per-category budgets with explicit thresholds (config has a `[budgets]` table, but no UI consumes it yet).
 - A small local TUI.
 - `config.d/*.toml` drop-ins.
 - In-popup add-to-watchlist gesture.

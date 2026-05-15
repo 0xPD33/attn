@@ -20,7 +20,7 @@ labels: bug
 
 - `attn --version` (or commit SHA):
 - OS / distribution:
-- Compositor: niri / sway / hyprland / other (note: V1 supports niri only)
+- Compositor: niri / Hyprland / Sway / river / other (other is best-effort)
 - Output of `attn doctor`:
   ```
   ```
