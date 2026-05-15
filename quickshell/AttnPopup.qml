@@ -353,13 +353,13 @@ PopupWindow {
 
     function requestBreakStart() {
         if (!attnBreakStart.running) {
-            attnBreakStart.exec(attnBreakStart.command);
+            attnBreakStart.running = true;
         }
     }
 
     function requestBreakEnd() {
         if (!attnBreakEnd.running) {
-            attnBreakEnd.exec(attnBreakEnd.command);
+            attnBreakEnd.running = true;
         }
     }
 
