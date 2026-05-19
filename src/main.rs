@@ -7,6 +7,8 @@ use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use glob::glob;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use url::Url;
+use zbus::zvariant::OwnedValue;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -82,7 +84,11 @@ fn run() -> Result<()> {
             let cfg = Config::load_default()?;
             let payload = format!(
                 "set_breaks {} {} {}\n",
-                if enabled.unwrap_or(cfg.breaks.enabled) { 1 } else { 0 },
+                if enabled.unwrap_or(cfg.breaks.enabled) {
+                    1
+                } else {
+                    0
+                },
                 interval.unwrap_or(cfg.breaks.interval_secs),
                 min_break.unwrap_or(cfg.breaks.min_break_secs),
             );
@@ -105,7 +111,8 @@ fn run() -> Result<()> {
             }
             let kind = kind.ok_or_else(|| anyhow!("categorize requires --kind=app|domain"))?;
             let id = id.ok_or_else(|| anyhow!("categorize requires --id=<value>"))?;
-            let category = category.ok_or_else(|| anyhow!("categorize requires --category=<name>"))?;
+            let category =
+                category.ok_or_else(|| anyhow!("categorize requires --category=<name>"))?;
             let kind_enum = match kind.as_str() {
                 "app" => CategorizeKind::App,
                 "domain" => CategorizeKind::Domain,
@@ -131,9 +138,14 @@ fn run() -> Result<()> {
                     secs = v.parse().ok();
                 }
             }
-            let category = category.ok_or_else(|| anyhow!("set-budget requires --category=<name>"))?;
-            let daily_budget_secs = secs.ok_or_else(|| anyhow!("set-budget requires --secs=<N>"))?;
-            let payload = serde_json::to_string(&SetBudgetRequest { category, daily_budget_secs })?;
+            let category =
+                category.ok_or_else(|| anyhow!("set-budget requires --category=<name>"))?;
+            let daily_budget_secs =
+                secs.ok_or_else(|| anyhow!("set-budget requires --secs=<N>"))?;
+            let payload = serde_json::to_string(&SetBudgetRequest {
+                category,
+                daily_budget_secs,
+            })?;
             let cfg = Config::load_default()?;
             let response = socket_request(&cfg.socket_path, &format!("set_budget {payload}\n"))?;
             println!("{response}");
@@ -152,9 +164,14 @@ fn run() -> Result<()> {
                     budget_exceeded = Some(v == "true" || v == "1");
                 }
             }
-            let payload = serde_json::to_string(&SetNotificationsRequest { enabled, break_overdue, budget_exceeded })?;
+            let payload = serde_json::to_string(&SetNotificationsRequest {
+                enabled,
+                break_overdue,
+                budget_exceeded,
+            })?;
             let cfg = Config::load_default()?;
-            let response = socket_request(&cfg.socket_path, &format!("set_notifications {payload}\n"))?;
+            let response =
+                socket_request(&cfg.socket_path, &format!("set_notifications {payload}\n"))?;
             println!("{response}");
             Ok(())
         }
@@ -165,10 +182,13 @@ fn run() -> Result<()> {
                     kind = Some(v.to_string());
                 }
             }
-            let kind = kind.ok_or_else(|| anyhow!("set-focus-source requires --kind=auto|niri|hyprland|river|sway"))?;
+            let kind = kind.ok_or_else(|| {
+                anyhow!("set-focus-source requires --kind=auto|niri|hyprland|river|sway")
+            })?;
             let payload = serde_json::to_string(&SetFocusSourceRequest { kind })?;
             let cfg = Config::load_default()?;
-            let response = socket_request(&cfg.socket_path, &format!("set_focus_source {payload}\n"))?;
+            let response =
+                socket_request(&cfg.socket_path, &format!("set_focus_source {payload}\n"))?;
             println!("{response}");
             Ok(())
         }
@@ -208,7 +228,8 @@ fn init_config(force: bool, merge: bool) -> Result<()> {
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         let mut config = bundled_default_config()?;
         config.apply_user_config(user_config);
-        let merged = toml::to_string_pretty(&config).context("failed to serialize merged config")?;
+        let merged =
+            toml::to_string_pretty(&config).context("failed to serialize merged config")?;
         ensure_parent_dir(&path)?;
         fs::write(&path, merged)
             .with_context(|| format!("failed to write config {}", path.display()))?;
@@ -256,6 +277,75 @@ struct Config {
     focus_source: FocusSourceConfig,
     #[serde(default)]
     notifications: NotificationsConfig,
+    #[serde(skip)]
+    index: Arc<ConfigIndex>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ConfigIndex {
+    app_categories: HashMap<String, String>,
+    terminal_categories: HashMap<String, String>,
+    terminal_programs: HashMap<String, String>,
+    terminal_app_ids: HashSet<String>,
+    domain_categories: Vec<(String, String)>,
+    browser_app_ids: HashSet<String>,
+}
+
+impl ConfigIndex {
+    fn build(config: &Config) -> Self {
+        let mut app_categories = HashMap::new();
+        for (category, ids) in &config.apps.watch {
+            for id in ids {
+                app_categories
+                    .entry(id.clone())
+                    .or_insert_with(|| category.clone());
+            }
+        }
+
+        let mut terminal_categories = HashMap::new();
+        let mut terminal_programs = HashMap::new();
+        for (category, names) in &config.terminals.apps {
+            for name in names {
+                terminal_categories
+                    .entry(name.clone())
+                    .or_insert_with(|| category.clone());
+                terminal_programs
+                    .entry(name.clone())
+                    .or_insert_with(|| name.clone());
+            }
+        }
+
+        let terminal_app_ids = config
+            .apps
+            .watch
+            .get("terminal")
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let mut domain_categories = Vec::new();
+        for (category, domains) in &config.domains.watch {
+            for domain in domains {
+                domain_categories.push((domain.clone(), category.clone()));
+            }
+        }
+
+        let browser_app_ids = config
+            .browsers
+            .values()
+            .flat_map(|browser| browser.app_ids.iter().cloned())
+            .collect();
+
+        Self {
+            app_categories,
+            terminal_categories,
+            terminal_programs,
+            terminal_app_ids,
+            domain_categories,
+            browser_app_ids,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -278,9 +368,15 @@ impl Default for BreaksConfig {
     }
 }
 
-fn default_breaks_enabled() -> bool { true }
-fn default_breaks_interval_secs() -> i64 { 3600 }
-fn default_breaks_min_break_secs() -> i64 { 300 }
+fn default_breaks_enabled() -> bool {
+    true
+}
+fn default_breaks_interval_secs() -> i64 {
+    3600
+}
+fn default_breaks_min_break_secs() -> i64 {
+    300
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FocusSourceConfig {
@@ -290,7 +386,9 @@ struct FocusSourceConfig {
 
 impl Default for FocusSourceConfig {
     fn default() -> Self {
-        Self { kind: default_focus_source_kind() }
+        Self {
+            kind: default_focus_source_kind(),
+        }
     }
 }
 
@@ -318,8 +416,12 @@ impl Default for NotificationsConfig {
     }
 }
 
-fn default_notifications_enabled() -> bool { true }
-fn default_true() -> bool { true }
+fn default_notifications_enabled() -> bool {
+    true
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TerminalsConfig {
@@ -343,7 +445,11 @@ fn default_terminals_config() -> TerminalsConfig {
     let mut apps = BTreeMap::new();
     apps.insert(
         "ai".to_string(),
-        vec!["claude".to_string(), "codex".to_string(), "aichat".to_string()],
+        vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "aichat".to_string(),
+        ],
     );
     apps.insert(
         "editor".to_string(),
@@ -810,7 +916,8 @@ fn default_browsers() -> BTreeMap<String, BrowserConfig> {
             ],
             history_paths: vec![
                 "~/.config/BraveSoftware/Brave-Browser/*/History".to_string(),
-                "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/*/History".to_string(),
+                "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/*/History"
+                    .to_string(),
                 "~/snap/brave/current/.config/BraveSoftware/Brave-Browser/*/History".to_string(),
             ],
             kind: "chromium".to_string(),
@@ -887,10 +994,7 @@ fn default_browsers() -> BTreeMap<String, BrowserConfig> {
     browsers.insert(
         "floorp".to_string(),
         BrowserConfig {
-            app_ids: vec![
-                "floorp".to_string(),
-                "one.ablaze.floorp".to_string(),
-            ],
+            app_ids: vec!["floorp".to_string(), "one.ablaze.floorp".to_string()],
             history_paths: vec!["~/.floorp/*/places.sqlite".to_string()],
             kind: "firefox".to_string(),
         },
@@ -939,6 +1043,9 @@ impl Config {
     fn normalized(mut self) -> Self {
         self.socket_path = expand_path(self.socket_path.to_string_lossy().as_ref());
         self.state_path = expand_path(self.state_path.to_string_lossy().as_ref());
+        normalize_string_lists(&mut self.apps.watch, normalize_id);
+        normalize_string_lists(&mut self.terminals.apps, normalize_id);
+        normalize_string_lists(&mut self.domains.watch, normalize_domain);
         for browser in self.browsers.values_mut() {
             browser.app_ids = browser
                 .app_ids
@@ -946,6 +1053,7 @@ impl Config {
                 .map(|id| normalize_id(id))
                 .collect::<Vec<_>>();
         }
+        self.index = Arc::new(ConfigIndex::build(&self));
         self
     }
 
@@ -982,58 +1090,35 @@ impl Config {
 
     fn category_for_app(&self, app_id: &str) -> Option<String> {
         let normalized = normalize_id(app_id);
-        let watch_hit = self.apps.watch.iter().find_map(|(category, ids)| {
-            ids.iter()
-                .any(|candidate| normalize_id(candidate) == normalized)
-                .then(|| category.clone())
-        });
-        if watch_hit.is_some() {
-            return watch_hit;
-        }
-        self.terminals.apps.iter().find_map(|(category, names)| {
-            names
-                .iter()
-                .any(|candidate| normalize_id(candidate) == normalized)
-                .then(|| category.clone())
-        })
+        self.index
+            .app_categories
+            .get(&normalized)
+            .cloned()
+            .or_else(|| self.index.terminal_categories.get(&normalized).cloned())
     }
 
     fn is_terminal_app(&self, app_id: &str) -> bool {
         let normalized = normalize_id(app_id);
-        self.apps
-            .watch
-            .get("terminal")
-            .map(|ids| ids.iter().any(|c| normalize_id(c) == normalized))
-            .unwrap_or(false)
+        self.index.terminal_app_ids.contains(&normalized)
     }
 
     fn terminal_subprocess_program(&self, name: &str) -> Option<String> {
         let normalized = normalize_id(name);
-        for names in self.terminals.apps.values() {
-            for candidate in names {
-                if normalize_id(candidate) == normalized {
-                    return Some(normalize_id(candidate));
-                }
-            }
-        }
-        None
+        self.index.terminal_programs.get(&normalized).cloned()
     }
 
     fn category_for_domain(&self, domain: &str) -> Option<String> {
         let domain = normalize_domain(domain);
-        self.domains.watch.iter().find_map(|(category, domains)| {
-            domains
-                .iter()
-                .any(|candidate| domain_matches(&domain, candidate))
-                .then(|| category.clone())
-        })
+        self.index
+            .domain_categories
+            .iter()
+            .find_map(|(candidate, category)| {
+                domain_matches_normalized(&domain, candidate).then(|| category.clone())
+            })
     }
 
     fn browser_app_ids(&self) -> HashSet<String> {
-        self.browsers
-            .values()
-            .flat_map(|browser| browser.app_ids.iter().cloned())
-            .collect()
+        self.index.browser_app_ids.clone()
     }
 }
 
@@ -1055,9 +1140,25 @@ fn merge_string_lists(
     }
 }
 
+fn normalize_string_lists(
+    values_by_key: &mut BTreeMap<String, Vec<String>>,
+    normalize: fn(&str) -> String,
+) {
+    for values in values_by_key.values_mut() {
+        let mut normalized = Vec::with_capacity(values.len());
+        for value in values.iter() {
+            let value = normalize(value);
+            if !value.is_empty() && !normalized.contains(&value) {
+                normalized.push(value);
+            }
+        }
+        *values = normalized;
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
-    config: Arc<Mutex<Config>>,
+    config: Arc<Mutex<Arc<Config>>>,
     db: Arc<Mutex<Connection>>,
     db_state_path: Arc<Mutex<PathBuf>>,
     socket_path: Arc<Mutex<PathBuf>>,
@@ -1129,6 +1230,7 @@ fn persist_pause_state(db: &Connection, info: Option<PauseInfo>) -> Result<()> {
 const REBUILD_MIN_INTERVAL: StdDuration = StdDuration::from_secs(3);
 const HEARTBEAT_INTERVAL: StdDuration = StdDuration::from_secs(30);
 const HEARTBEAT_STALE_AFTER: StdDuration = StdDuration::from_secs(60);
+const MEDIA_POLL_INTERVAL: StdDuration = StdDuration::from_secs(2);
 
 fn run_daemon() -> Result<()> {
     cleanup_stale_snapshots();
@@ -1137,6 +1239,7 @@ fn run_daemon() -> Result<()> {
     let now = Utc::now();
     cap_open_intervals_at_stale_heartbeat(&db, now)?;
     close_stale_open_intervals(&db, now, config.idle_after_secs)?;
+    close_open_media_intervals(&db, now)?;
     load_breaks_override(&db, &mut config.breaks)?;
 
     // Resolve focus source kind once at startup.
@@ -1153,7 +1256,7 @@ fn run_daemon() -> Result<()> {
         Arc::new(notifications::NullNotifier)
     };
     let state = AppState {
-        config: Arc::new(Mutex::new(config.clone())),
+        config: Arc::new(Mutex::new(Arc::new(config.clone()))),
         db: Arc::new(Mutex::new(db)),
         db_state_path: Arc::new(Mutex::new(config.state_path.clone())),
         socket_path: Arc::new(Mutex::new(config.socket_path.clone())),
@@ -1187,6 +1290,17 @@ fn run_daemon() -> Result<()> {
         let elapsed = start.elapsed();
         if elapsed < StdDuration::from_secs(poll_secs) {
             thread::sleep(StdDuration::from_secs(poll_secs) - elapsed);
+        }
+    });
+
+    let media_state = state.clone();
+    thread::spawn(move || loop {
+        if let Err(error) = run_mpris_media_loop(&media_state) {
+            eprintln!("attn mpris media error: {error:#}");
+            if let Ok(db) = media_state.db.lock() {
+                let _ = close_open_media_intervals(&db, Utc::now());
+            }
+            thread::sleep(StdDuration::from_secs(10));
         }
     });
 
@@ -1270,9 +1384,13 @@ fn run_wayland_idle_listener(state: &AppState) -> Result<()> {
     };
 
     // First roundtrip surfaces the globals.
-    event_queue.roundtrip(&mut client).context("wayland roundtrip")?;
+    event_queue
+        .roundtrip(&mut client)
+        .context("wayland roundtrip")?;
     // Second roundtrip pulls follow-up events (e.g. wl_seat capabilities).
-    event_queue.roundtrip(&mut client).context("wayland roundtrip 2")?;
+    event_queue
+        .roundtrip(&mut client)
+        .context("wayland roundtrip 2")?;
 
     client.try_subscribe(&qh)?;
 
@@ -1312,7 +1430,10 @@ impl IdleClient {
         if current.is_some() {
             return;
         }
-        let info = PauseInfo { at: now, reason: PauseReason::Idle };
+        let info = PauseInfo {
+            at: now,
+            reason: PauseReason::Idle,
+        };
         let config = self.state.config.lock().unwrap().clone();
         let db = self.state.db.lock().unwrap();
         if let Err(e) = close_open_interval(&db, now, config.idle_after_secs) {
@@ -1344,7 +1465,8 @@ impl IdleClient {
         drop(db);
         if let Ok(Some(window)) = query_focused_window(&self.state) {
             let config = self.state.config.lock().unwrap().clone();
-            let resolved = resolve_focused_window(window, &config, &self.state.terminal_window_cache);
+            let resolved =
+                resolve_focused_window(window, &config, &self.state.terminal_window_cache);
             let db = self.state.db.lock().unwrap();
             if let Err(e) = open_app_interval(&db, now, &resolved) {
                 eprintln!("attn idle: reopen interval failed: {e:#}");
@@ -1353,7 +1475,9 @@ impl IdleClient {
     }
 }
 
-impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry, ()> for IdleClient {
+impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry, ()>
+    for IdleClient
+{
     fn event(
         client: &mut Self,
         registry: &wayland_client::protocol::wl_registry::WlRegistry,
@@ -1473,22 +1597,141 @@ fn run_dbus_sleep_listener(state: &AppState) -> Result<()> {
             let config = state.config.lock().unwrap().clone();
             let db = state.db.lock().unwrap();
             let _ = close_open_interval(&db, now, config.idle_after_secs);
+            let _ = close_open_media_intervals(&db, now);
         }
     }
     Ok(())
 }
 
+fn run_mpris_media_loop(state: &AppState) -> Result<()> {
+    use zbus::blocking::Connection as ZConnection;
+
+    let conn = ZConnection::session().context("connect to session D-Bus")?;
+    loop {
+        sync_mpris_media_once(state, &conn)?;
+        thread::sleep(MEDIA_POLL_INTERVAL);
+    }
+}
+
+fn sync_mpris_media_once(state: &AppState, conn: &zbus::blocking::Connection) -> Result<()> {
+    let snapshots = collect_mpris_snapshots(conn)?;
+    let config = state.config.lock().unwrap().clone();
+    let db = state.db.lock().unwrap();
+    let open = open_app_identity(&db)?;
+    let snapshots = snapshots
+        .into_iter()
+        .filter_map(|mut snapshot| {
+            infer_media_domain_from_focus(&mut snapshot, &config, open.as_ref());
+            should_track_media_snapshot(&snapshot, &config, open.as_ref()).then_some(snapshot)
+        })
+        .collect::<Vec<_>>();
+    sync_media_snapshots(&db, Utc::now(), &snapshots)
+}
+
+fn collect_mpris_snapshots(conn: &zbus::blocking::Connection) -> Result<Vec<MediaSnapshot>> {
+    let proxy = zbus::blocking::fdo::DBusProxy::new(conn).context("create DBus proxy")?;
+    let names = proxy.list_names().context("list D-Bus names")?;
+    let mut snapshots = Vec::new();
+
+    for name in names {
+        let name = name.to_string();
+        if !is_mpris_bus_name(&name) {
+            continue;
+        }
+        match read_mpris_snapshot(conn, &name) {
+            Ok(Some(snapshot)) => snapshots.push(snapshot),
+            Ok(None) => {}
+            Err(error) => eprintln!("attn mpris read {name}: {error:#}"),
+        }
+    }
+
+    Ok(snapshots)
+}
+
+fn read_mpris_snapshot(
+    conn: &zbus::blocking::Connection,
+    bus_name: &str,
+) -> Result<Option<MediaSnapshot>> {
+    let proxy = zbus::blocking::Proxy::new(
+        conn,
+        bus_name,
+        "/org/mpris/MediaPlayer2",
+        "org.mpris.MediaPlayer2.Player",
+    )
+    .with_context(|| format!("create MPRIS player proxy for {bus_name}"))?;
+    let playback_status: String = proxy
+        .get_property("PlaybackStatus")
+        .with_context(|| format!("read PlaybackStatus for {bus_name}"))?;
+    if playback_status != "Playing" {
+        return Ok(None);
+    }
+
+    let metadata: HashMap<String, OwnedValue> = proxy.get_property("Metadata").unwrap_or_default();
+    let title = metadata_string(&metadata, "xesam:title").unwrap_or_default();
+    let artist = metadata_string_vec(&metadata, "xesam:artist").join(", ");
+    let url = metadata_string(&metadata, "xesam:url")
+        .or_else(|| metadata_string(&metadata, "xesam:asText"))
+        .unwrap_or_default();
+    let domain = domain_from_media_url(&url).unwrap_or_default();
+
+    Ok(Some(MediaSnapshot {
+        playback_id: bus_name.to_string(),
+        player_name: player_name_from_mpris_bus(bus_name),
+        title,
+        artist,
+        url,
+        domain,
+        source: "mpris".to_string(),
+    }))
+}
+
+fn is_mpris_bus_name(name: &str) -> bool {
+    name.starts_with("org.mpris.MediaPlayer2.") && name.len() > "org.mpris.MediaPlayer2.".len()
+}
+
+fn player_name_from_mpris_bus(name: &str) -> String {
+    name.trim_start_matches("org.mpris.MediaPlayer2.")
+        .split('.')
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+}
+
+fn metadata_string(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(|value| value.try_clone().ok())
+        .and_then(|value| String::try_from(value).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn metadata_string_vec(metadata: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
+    metadata
+        .get(key)
+        .and_then(|value| value.try_clone().ok())
+        .and_then(|value| Vec::<String>::try_from(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn domain_from_media_url(raw_url: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    let host = url.host_str()?;
+    Some(normalize_domain(host))
+}
+
 fn run_config_watcher(state: AppState) {
     let path = expand_path(DEFAULT_CONFIG_PATH);
-    let mut last_mtime: Option<std::time::SystemTime> = fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mut last_mtime: Option<std::time::SystemTime> =
+        fs::metadata(&path).and_then(|m| m.modified()).ok();
     loop {
         thread::sleep(StdDuration::from_secs(3));
-        let mtime = match fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(m) => Some(m),
-            Err(_) => None,
-        };
+        let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
         if mtime != last_mtime {
             last_mtime = mtime;
             if mtime.is_none() {
@@ -1523,6 +1766,7 @@ fn cap_open_intervals_at_stale_heartbeat(db: &Connection, now: DateTime<Utc>) ->
             params![ended_at.to_rfc3339(), id],
         )?;
     }
+    close_open_media_intervals(db, last)?;
     Ok(())
 }
 
@@ -1539,6 +1783,7 @@ fn install_shutdown_handler(state: AppState) -> Result<()> {
         if let Some(config) = config {
             if let Ok(db) = state.db.lock() {
                 let _ = close_open_interval(&db, now, config.idle_after_secs);
+                let _ = close_open_media_intervals(&db, now);
             }
             if let Ok(socket_path) = state.socket_path.lock() {
                 let _ = fs::remove_file(&*socket_path);
@@ -1601,6 +1846,13 @@ fn cleanup_socket_path(socket_path: &Path) -> Result<()> {
 }
 
 fn handle_client(state: AppState, mut stream: UnixStream) -> Result<()> {
+    stream
+        .set_read_timeout(Some(SOCKET_REQUEST_TIMEOUT))
+        .context("failed to set accepted socket read timeout")?;
+    stream
+        .set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT))
+        .context("failed to set accepted socket write timeout")?;
+
     let mut request = String::new();
     {
         let mut reader = BufReader::new(&mut stream);
@@ -1767,13 +2019,23 @@ struct CategorizeResponse {
 }
 
 impl CategorizeResponse {
-    fn ok() -> Self { Self { ok: true, error: None } }
-    fn err(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()) } }
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn err(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
 }
 
 fn handle_categorize(state: &AppState, req: CategorizeRequest) -> Result<CategorizeResponse> {
-    use toml_edit::{DocumentMut, Item, Value, Array};
     use std::time::SystemTime;
+    use toml_edit::{Array, DocumentMut, Item, Value};
 
     let config_path = expand_path(DEFAULT_CONFIG_PATH);
     if !config_path.exists() {
@@ -1804,7 +2066,8 @@ fn handle_categorize(state: &AppState, req: CategorizeRequest) -> Result<Categor
     }
 
     // Parse with toml_edit to preserve comments and ordering.
-    let mut doc = raw.parse::<DocumentMut>()
+    let mut doc = raw
+        .parse::<DocumentMut>()
         .with_context(|| "failed to parse config with toml_edit")?;
 
     let section_key = match req.kind {
@@ -1823,9 +2086,7 @@ fn handle_categorize(state: &AppState, req: CategorizeRequest) -> Result<Categor
 
     match section {
         Some(arr) => {
-            let already_present = arr.iter().any(|v| {
-                v.as_str().map_or(false, |s| s == req.id)
-            });
+            let already_present = arr.iter().any(|v| v.as_str().is_some_and(|s| s == req.id));
             if !already_present {
                 arr.push(req.id.as_str());
             }
@@ -1888,9 +2149,27 @@ struct SimpleResponse {
 }
 
 impl SimpleResponse {
-    fn ok() -> Self { Self { ok: true, error: None, message: None } }
-    fn ok_msg(msg: impl Into<String>) -> Self { Self { ok: true, error: None, message: Some(msg.into()) } }
-    fn err(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()), message: None } }
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+            message: None,
+        }
+    }
+    fn ok_msg(msg: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            message: Some(msg.into()),
+        }
+    }
+    fn err(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+            message: None,
+        }
+    }
 }
 
 // ── set_budget ────────────────────────────────────────────────────────────────
@@ -1902,8 +2181,8 @@ struct SetBudgetRequest {
 }
 
 fn handle_set_budget(state: &AppState, req: SetBudgetRequest) -> Result<SimpleResponse> {
-    use toml_edit::{DocumentMut, Item, Table, value};
     use std::time::SystemTime;
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     let config_path = expand_path(DEFAULT_CONFIG_PATH);
     if !config_path.exists() {
@@ -1918,7 +2197,9 @@ fn handle_set_budget(state: &AppState, req: SetBudgetRequest) -> Result<SimpleRe
         if !in_apps && !in_domains {
             let mut all_cats: Vec<String> = config.apps.watch.keys().cloned().collect();
             for k in config.domains.watch.keys() {
-                if !all_cats.contains(k) { all_cats.push(k.clone()); }
+                if !all_cats.contains(k) {
+                    all_cats.push(k.clone());
+                }
             }
             all_cats.sort();
             return Ok(SimpleResponse::err(format!(
@@ -1936,7 +2217,8 @@ fn handle_set_budget(state: &AppState, req: SetBudgetRequest) -> Result<SimpleRe
     let raw = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read config {}", config_path.display()))?;
 
-    let mut doc = raw.parse::<DocumentMut>()
+    let mut doc = raw
+        .parse::<DocumentMut>()
         .context("failed to parse config with toml_edit")?;
 
     if req.daily_budget_secs == 0 {
@@ -1976,7 +2258,8 @@ fn handle_set_budget(state: &AppState, req: SetBudgetRequest) -> Result<SimpleRe
         .suffix(".toml.tmp")
         .tempfile_in(parent)
         .context("failed to create temp config file")?;
-    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.write_all(doc.to_string().as_bytes())
+        .context("failed to write temp config")?;
     tmp.flush().context("failed to flush temp config")?;
     tmp.persist(&config_path)
         .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
@@ -1994,9 +2277,12 @@ struct SetNotificationsRequest {
     budget_exceeded: Option<bool>,
 }
 
-fn handle_set_notifications(state: &AppState, req: SetNotificationsRequest) -> Result<SimpleResponse> {
-    use toml_edit::{DocumentMut, Item, Table, value};
+fn handle_set_notifications(
+    state: &AppState,
+    req: SetNotificationsRequest,
+) -> Result<SimpleResponse> {
     use std::time::SystemTime;
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     let config_path = expand_path(DEFAULT_CONFIG_PATH);
     if !config_path.exists() {
@@ -2010,7 +2296,8 @@ fn handle_set_notifications(state: &AppState, req: SetNotificationsRequest) -> R
     let raw = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read config {}", config_path.display()))?;
 
-    let mut doc = raw.parse::<DocumentMut>()
+    let mut doc = raw
+        .parse::<DocumentMut>()
         .context("failed to parse config with toml_edit")?;
 
     // Ensure [notifications] table exists.
@@ -2045,7 +2332,8 @@ fn handle_set_notifications(state: &AppState, req: SetNotificationsRequest) -> R
         .suffix(".toml.tmp")
         .tempfile_in(parent)
         .context("failed to create temp config file")?;
-    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.write_all(doc.to_string().as_bytes())
+        .context("failed to write temp config")?;
     tmp.flush().context("failed to flush temp config")?;
     tmp.persist(&config_path)
         .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
@@ -2064,8 +2352,8 @@ struct SetFocusSourceRequest {
 const VALID_FOCUS_KINDS: &[&str] = &["auto", "niri", "hyprland", "river", "sway"];
 
 fn handle_set_focus_source(state: &AppState, req: SetFocusSourceRequest) -> Result<SimpleResponse> {
-    use toml_edit::{DocumentMut, Item, Table, value};
     use std::time::SystemTime;
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     if !VALID_FOCUS_KINDS.contains(&req.kind.as_str()) {
         return Ok(SimpleResponse::err(format!(
@@ -2087,7 +2375,8 @@ fn handle_set_focus_source(state: &AppState, req: SetFocusSourceRequest) -> Resu
     let raw = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read config {}", config_path.display()))?;
 
-    let mut doc = raw.parse::<DocumentMut>()
+    let mut doc = raw
+        .parse::<DocumentMut>()
         .context("failed to parse config with toml_edit")?;
 
     if doc.get("focus_source").is_none() {
@@ -2112,7 +2401,8 @@ fn handle_set_focus_source(state: &AppState, req: SetFocusSourceRequest) -> Resu
         .suffix(".toml.tmp")
         .tempfile_in(parent)
         .context("failed to create temp config file")?;
-    tmp.write_all(doc.to_string().as_bytes()).context("failed to write temp config")?;
+    tmp.write_all(doc.to_string().as_bytes())
+        .context("failed to write temp config")?;
     tmp.flush().context("failed to flush temp config")?;
     tmp.persist(&config_path)
         .map_err(|e| anyhow!("failed to persist config: {}", e.error))?;
@@ -2120,7 +2410,7 @@ fn handle_set_focus_source(state: &AppState, req: SetFocusSourceRequest) -> Resu
     let _ = reload_daemon_config(state);
 
     Ok(SimpleResponse::ok_msg(
-        "focus source updated; restart daemon for the new kind to take effect"
+        "focus source updated; restart daemon for the new kind to take effect",
     ))
 }
 
@@ -2136,9 +2426,11 @@ fn apply_breaks_override(
     meta_set(&db, "breaks_min_break_secs", &min_break_secs.to_string())?;
     drop(db);
     let mut config = state.config.lock().unwrap();
-    config.breaks.enabled = enabled;
-    config.breaks.interval_secs = interval_secs;
-    config.breaks.min_break_secs = min_break_secs;
+    let mut updated = config.as_ref().clone();
+    updated.breaks.enabled = enabled;
+    updated.breaks.interval_secs = interval_secs;
+    updated.breaks.min_break_secs = min_break_secs;
+    *config = Arc::new(updated);
     Ok(())
 }
 
@@ -2236,7 +2528,7 @@ fn reload_daemon_config(state: &AppState) -> Result<ReloadResponse> {
     }
 
     let mut config = state.config.lock().unwrap();
-    *config = new_config;
+    *config = Arc::new(new_config);
 
     Ok(ReloadResponse {
         ok: true,
@@ -2298,7 +2590,10 @@ fn run_focus_dispatch(state: AppState) -> Result<()> {
     Ok(())
 }
 
-fn handle_focus_change_with(state: &AppState, current_window: Option<focus::FocusedWindow>) -> Result<()> {
+fn handle_focus_change_with(
+    state: &AppState,
+    current_window: Option<focus::FocusedWindow>,
+) -> Result<()> {
     let now = Utc::now();
     let config = state.config.lock().unwrap().clone();
 
@@ -2329,7 +2624,8 @@ fn handle_focus_change_with(state: &AppState, current_window: Option<focus::Focu
         return Ok(());
     }
 
-    let current = current_window.map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
+    let current =
+        current_window.map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
     match (open, current) {
         (Some(open), Some(window)) if open.matches(&window) => {}
         (Some(_), Some(window)) => {
@@ -2361,6 +2657,7 @@ use focus::FocusedWindow;
 struct OpenAppInterval {
     window_id: Option<i64>,
     app_id: String,
+    window_title: String,
 }
 
 impl OpenAppInterval {
@@ -2388,7 +2685,10 @@ struct TerminalWindowCache {
 
 impl TerminalWindowCache {
     fn new() -> Self {
-        Self { map: HashMap::new(), order: std::collections::VecDeque::new() }
+        Self {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
     }
 
     fn get(&self, window_id: i64) -> Option<&str> {
@@ -2396,9 +2696,9 @@ impl TerminalWindowCache {
     }
 
     fn insert(&mut self, window_id: i64, name: String) {
-        if self.map.contains_key(&window_id) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.map.entry(window_id) {
             // Update value without reordering.
-            self.map.insert(window_id, name);
+            entry.insert(name);
             return;
         }
         if self.order.len() >= TERMINAL_CACHE_CAP {
@@ -2446,7 +2746,9 @@ fn resolve_focused_window(
     }
 
     // Fall through to /proc walk.
-    let Some(pid) = window.pid else { return window; };
+    let Some(pid) = window.pid else {
+        return window;
+    };
     let descendants = collect_proc_descendants(pid);
     let descendant_pids: HashSet<i32> = descendants.iter().map(|d| d.pid).collect();
     if let Some(name) = pick_tmux_subprocess(&descendant_pids, config) {
@@ -2464,7 +2766,11 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
         return None;
     }
     let output = Command::new("tmux")
-        .args(["list-clients", "-F", "#{client_pid}|#{client_session}|#{client_activity}"])
+        .args([
+            "list-clients",
+            "-F",
+            "#{client_pid}|#{client_session}|#{client_activity}",
+        ])
         .stderr(Stdio::null())
         .output()
         .ok()?;
@@ -2501,9 +2807,15 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
         if !cmd_output.status.success() {
             continue;
         }
-        let cmd = String::from_utf8_lossy(&cmd_output.stdout).trim().to_string();
+        let cmd = String::from_utf8_lossy(&cmd_output.stdout)
+            .trim()
+            .to_string();
         if let Some(name) = config.terminal_subprocess_program(&cmd) {
-            if best.as_ref().map(|(act, _)| activity > *act).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|(act, _)| activity > *act)
+                .unwrap_or(true)
+            {
                 best = Some((activity, name));
             }
         }
@@ -2514,10 +2826,9 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
 /// Braille spinner chars used by Claude Code, plus common status markers.
 /// U+2800..U+28FF (braille), ✳ U+2733, ⏵ U+23F5, ✶ U+2736.
 const CLAUDE_TITLE_MARKERS: &[char] = &[
-    '✳', '⏵', '✶',
-    // Braille spinners
-    '⠂', '⠐', '⠏', '⠦', '⠹', '⠼', '⠴', '⠧', '⠇', '⠋', '⠙', '⠸', '⠨',
-    '⢿', '⣷', '⣯', '⣟', '⡿', '⣻', '⣽', '⣾',
+    '✳', '⏵', '✶', // Braille spinners
+    '⠂', '⠐', '⠏', '⠦', '⠹', '⠼', '⠴', '⠧', '⠇', '⠋', '⠙', '⠸', '⠨', '⢿', '⣷', '⣯', '⣟', '⡿', '⣻',
+    '⣽', '⣾',
 ];
 
 /// Return the config name mapped to "claude" if present, otherwise "claude".
@@ -2559,10 +2870,9 @@ fn match_terminal_program_in_title(title: &str, config: &Config) -> Option<Strin
                 let ok_left = idx == 0 || !is_word_char(lowered.as_bytes()[idx - 1]);
                 let end = idx + normalized.len();
                 let ok_right = end == lowered.len() || !is_word_char(lowered.as_bytes()[end]);
-                if ok_left && ok_right {
-                    if best.as_ref().map(|(prev, _)| idx < *prev).unwrap_or(true) {
-                        best = Some((idx, normalized));
-                    }
+                if ok_left && ok_right && best.as_ref().map(|(prev, _)| idx < *prev).unwrap_or(true)
+                {
+                    best = Some((idx, normalized));
                 }
             }
         }
@@ -2582,10 +2892,7 @@ struct DescendantProc {
     start_time: u64,
 }
 
-fn pick_terminal_subprocess(
-    candidates: &[DescendantProc],
-    config: &Config,
-) -> Option<String> {
+fn pick_terminal_subprocess(candidates: &[DescendantProc], config: &Config) -> Option<String> {
     candidates
         .iter()
         .filter_map(|p| {
@@ -2608,7 +2915,12 @@ fn collect_proc_descendants(root_pid: i32) -> Vec<DescendantProc> {
         if depth > 0 {
             if let Some(name) = read_proc_program_name(pid) {
                 let start_time = read_proc_start_time(pid).unwrap_or(0);
-                out.push(DescendantProc { pid, depth, name, start_time });
+                out.push(DescendantProc {
+                    pid,
+                    depth,
+                    name,
+                    start_time,
+                });
             }
         }
         for child in read_proc_children(pid) {
@@ -2635,7 +2947,9 @@ fn read_proc_children(pid: i32) -> Vec<i32> {
     };
     for entry in entries.flatten() {
         let path = entry.path().join("children");
-        let Ok(data) = fs::read_to_string(&path) else { continue; };
+        let Ok(data) = fs::read_to_string(&path) else {
+            continue;
+        };
         for token in data.split_whitespace() {
             if let Ok(child) = token.parse::<i32>() {
                 result.push(child);
@@ -2694,6 +3008,19 @@ fn migrate(db: &Connection) -> Result<()> {
           source_profile TEXT NOT NULL DEFAULT ''
         );
 
+        CREATE TABLE IF NOT EXISTS media_intervals (
+          id INTEGER PRIMARY KEY,
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          playback_id TEXT NOT NULL,
+          player_name TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          artist TEXT NOT NULL DEFAULT '',
+          url TEXT NOT NULL DEFAULT '',
+          domain TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'mpris'
+        );
+
         CREATE TABLE IF NOT EXISTS daily_app_totals (
           day TEXT NOT NULL,
           app_id TEXT NOT NULL,
@@ -2719,8 +3046,23 @@ fn migrate(db: &Connection) -> Result<()> {
           ON app_intervals(started_at);
         CREATE INDEX IF NOT EXISTS app_intervals_app_started_idx
           ON app_intervals(app_id, started_at);
+        CREATE INDEX IF NOT EXISTS app_intervals_open_idx
+          ON app_intervals(ended_at, id);
         CREATE INDEX IF NOT EXISTS domain_intervals_started_idx
           ON domain_intervals(started_at);
+        CREATE INDEX IF NOT EXISTS domain_intervals_browser_coverage_idx
+          ON domain_intervals(browser_app_id, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS domain_intervals_import_idx
+          ON domain_intervals(browser_name, source_profile, started_at, ended_at);
+        CREATE INDEX IF NOT EXISTS domain_intervals_legacy_import_idx
+          ON domain_intervals(browser_app_id, source_profile, started_at, ended_at)
+          WHERE browser_name = '';
+        CREATE INDEX IF NOT EXISTS media_intervals_started_idx
+          ON media_intervals(started_at);
+        CREATE INDEX IF NOT EXISTS media_intervals_open_idx
+          ON media_intervals(playback_id, ended_at);
+        CREATE INDEX IF NOT EXISTS media_intervals_ended_idx
+          ON media_intervals(ended_at, id);
         ",
     )?;
     add_column_if_missing(db, "app_intervals", "window_id", "INTEGER")?;
@@ -2832,12 +3174,13 @@ fn open_app_interval(db: &Connection, now: DateTime<Utc>, window: &FocusedWindow
 
 fn open_app_identity(db: &Connection) -> Result<Option<OpenAppInterval>> {
     db.query_row(
-        "SELECT window_id, app_id FROM app_intervals WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1",
+        "SELECT window_id, app_id, window_title FROM app_intervals WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1",
         [],
         |row| {
             Ok(OpenAppInterval {
                 window_id: row.get(0)?,
                 app_id: row.get(1)?,
+                window_title: row.get(2)?,
             })
         },
     )
@@ -2866,14 +3209,178 @@ fn close_open_interval(db: &Connection, now: DateTime<Utc>, idle_after_secs: i64
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaSnapshot {
+    playback_id: String,
+    player_name: String,
+    title: String,
+    artist: String,
+    url: String,
+    domain: String,
+    source: String,
+}
+
+impl MediaSnapshot {
+    fn same_media(&self, other: &OpenMediaInterval) -> bool {
+        self.player_name == other.player_name
+            && self.title == other.title
+            && self.artist == other.artist
+            && self.url == other.url
+            && self.domain == other.domain
+            && self.source == other.source
+    }
+}
+
+#[derive(Debug)]
+struct OpenMediaInterval {
+    id: i64,
+    started_at: DateTime<Utc>,
+    player_name: String,
+    title: String,
+    artist: String,
+    url: String,
+    domain: String,
+    source: String,
+}
+
+fn sync_media_snapshots(
+    db: &Connection,
+    now: DateTime<Utc>,
+    snapshots: &[MediaSnapshot],
+) -> Result<()> {
+    let active_ids = snapshots
+        .iter()
+        .map(|snapshot| snapshot.playback_id.as_str())
+        .collect::<HashSet<_>>();
+
+    for snapshot in snapshots {
+        sync_media_snapshot(db, now, snapshot)?;
+    }
+
+    let mut stmt = db.prepare(
+        "SELECT id, started_at, playback_id
+         FROM media_intervals
+         WHERE ended_at IS NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let open_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, started_at, playback_id) in open_rows {
+        if active_ids.contains(playback_id.as_str()) {
+            continue;
+        }
+        close_media_interval_by_id(db, id, &started_at, now)?;
+    }
+
+    Ok(())
+}
+
+fn sync_media_snapshot(
+    db: &Connection,
+    now: DateTime<Utc>,
+    snapshot: &MediaSnapshot,
+) -> Result<()> {
+    if let Some(open) = open_media_interval(db, &snapshot.playback_id)? {
+        if snapshot.same_media(&open) {
+            return Ok(());
+        }
+        close_media_interval_by_id(db, open.id, &open.started_at.to_rfc3339(), now)?;
+    }
+
+    db.execute(
+        "INSERT INTO media_intervals(
+            started_at, playback_id, player_name, title, artist, url, domain, source
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            now.to_rfc3339(),
+            snapshot.playback_id,
+            snapshot.player_name,
+            snapshot.title,
+            snapshot.artist,
+            snapshot.url,
+            snapshot.domain,
+            snapshot.source,
+        ],
+    )?;
+    Ok(())
+}
+
+fn open_media_interval(db: &Connection, playback_id: &str) -> Result<Option<OpenMediaInterval>> {
+    db.query_row(
+        "SELECT id, started_at, player_name, title, artist, url, domain, source
+         FROM media_intervals
+         WHERE ended_at IS NULL AND playback_id = ?1
+         ORDER BY id DESC LIMIT 1",
+        params![playback_id],
+        |row| {
+            let started_at: String = row.get(1)?;
+            Ok(OpenMediaInterval {
+                id: row.get(0)?,
+                started_at: parse_rfc3339_utc(&started_at).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+                player_name: row.get(2)?,
+                title: row.get(3)?,
+                artist: row.get(4)?,
+                url: row.get(5)?,
+                domain: row.get(6)?,
+                source: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn close_open_media_intervals(db: &Connection, now: DateTime<Utc>) -> Result<()> {
+    let mut stmt =
+        db.prepare("SELECT id, started_at FROM media_intervals WHERE ended_at IS NULL")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let open_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, started_at) in open_rows {
+        close_media_interval_by_id(db, id, &started_at, now)?;
+    }
+    Ok(())
+}
+
+fn close_media_interval_by_id(
+    db: &Connection,
+    id: i64,
+    started_at: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let started_at = parse_rfc3339_utc(started_at)?;
+    let ended_at = now.max(started_at);
+    db.execute(
+        "UPDATE media_intervals SET ended_at = ?1 WHERE id = ?2",
+        params![ended_at.to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct Status {
     date: String,
     updated_at: String,
     watch_seconds: i64,
     tracked_seconds: i64,
+    media_seconds: i64,
+    video_watch_seconds: i64,
     apps: Vec<AppStatus>,
     domains: Vec<DomainStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    media: Vec<MediaStatus>,
     categories: Vec<CategoryStatus>,
     days: Vec<DaySummary>,
     active_session_seconds: i64,
@@ -2901,6 +3408,8 @@ struct DaySummary {
     date: String,
     tracked_seconds: i64,
     watch_seconds: i64,
+    media_seconds: i64,
+    video_watch_seconds: i64,
     categories: Vec<CategoryStatus>,
 }
 
@@ -2926,6 +3435,17 @@ struct AppStatus {
 struct DomainStatus {
     domain: String,
     seconds: i64,
+    watched: bool,
+    category: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MediaStatus {
+    player_name: String,
+    label: String,
+    seconds: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
     watched: bool,
     category: Option<String>,
 }
@@ -2995,6 +3515,7 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
 
     let apps = load_app_status(db, &day_string)?;
     let domains = load_domain_status(db, &day_string, &config.display)?;
+    let media = load_media_status(db, config, day, now)?;
 
     let watched_non_browser_apps: i64 = apps
         .iter()
@@ -3007,6 +3528,12 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
         .map(|domain| domain.seconds)
         .sum();
     let watch_seconds = watched_non_browser_apps + watched_domains;
+    let media_seconds: i64 = media.iter().map(|item| item.seconds).sum();
+    let video_watch_seconds: i64 = media
+        .iter()
+        .filter(|item| item.category.as_deref() == Some("video"))
+        .map(|item| item.seconds)
+        .sum();
 
     let mut category_totals: BTreeMap<String, i64> = BTreeMap::new();
     for app in &apps {
@@ -3033,8 +3560,13 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
                 .budgets
                 .get(&name)
                 .and_then(|b| (b.daily_budget_secs > 0).then_some(b.daily_budget_secs));
-            let over_budget = budget_secs.map_or(false, |b| seconds >= b);
-            CategoryStatus { name, seconds, budget_secs, over_budget }
+            let over_budget = budget_secs.is_some_and(|b| seconds >= b);
+            CategoryStatus {
+                name,
+                seconds,
+                budget_secs,
+                over_budget,
+            }
         })
         .collect();
     categories.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
@@ -3062,20 +3594,23 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
             config.idle_after_secs,
         )?
     };
-    let break_overdue = config.breaks.enabled
-        && !paused
-        && active_session_seconds >= config.breaks.interval_secs;
+    let break_overdue =
+        config.breaks.enabled && !paused && active_session_seconds >= config.breaks.interval_secs;
 
     let uncategorized_apps = build_uncategorized_apps(&apps, &browser_ids);
-    let uncategorized_domains = build_uncategorized_domains(&domains, config.display.domains_min_seconds);
+    let uncategorized_domains =
+        build_uncategorized_domains(&domains, config.display.domains_min_seconds);
 
     Ok(Status {
         date: day_string,
         updated_at: Local::now().to_rfc3339(),
         watch_seconds,
         tracked_seconds,
+        media_seconds,
+        video_watch_seconds,
         apps,
         domains,
+        media,
         categories,
         days,
         active_session_seconds,
@@ -3117,15 +3652,18 @@ fn run_notification_check(state: &AppState) -> Result<()> {
             )?;
             if active_secs >= config.breaks.interval_secs {
                 // Use session_reset_at (or empty string) as the per-session dedup key.
-                let session_id = meta_get(&db, "session_reset_at")?
-                    .unwrap_or_default();
-                let notified_session = meta_get(&db, "notified_break_overdue")?
-                    .unwrap_or_default();
+                let session_id = meta_get(&db, "session_reset_at")?.unwrap_or_default();
+                let notified_session = meta_get(&db, "notified_break_overdue")?.unwrap_or_default();
                 if notified_session != session_id {
                     let overdue_secs = active_secs - config.breaks.interval_secs;
-                    if let Err(e) = state.notifier.notify(
-                        notifications::NotificationKind::BreakOverdue { active_secs, overdue_secs },
-                    ) {
+                    if let Err(e) =
+                        state
+                            .notifier
+                            .notify(notifications::NotificationKind::BreakOverdue {
+                                active_secs,
+                                overdue_secs,
+                            })
+                    {
                         eprintln!("attn notify break_overdue: {e:#}");
                     }
                     meta_set(&db, "notified_break_overdue", &session_id)?;
@@ -3156,19 +3694,27 @@ fn run_notification_check(state: &AppState) -> Result<()> {
         }
 
         for (name, seconds) in &category_totals {
-            let Some(budget) = config.budgets.get(name) else { continue };
-            if budget.daily_budget_secs <= 0 { continue; }
-            if *seconds <= budget.daily_budget_secs { continue; }
+            let Some(budget) = config.budgets.get(name) else {
+                continue;
+            };
+            if budget.daily_budget_secs <= 0 {
+                continue;
+            }
+            if *seconds <= budget.daily_budget_secs {
+                continue;
+            }
 
             let dedup_key = format!("notified_budget:{}:{}", day_string, name);
             if meta_get(&db, &dedup_key)?.is_none() {
-                if let Err(e) = state.notifier.notify(
-                    notifications::NotificationKind::BudgetExceeded {
-                        category: name.clone(),
-                        seconds: *seconds,
-                        budget_secs: budget.daily_budget_secs,
-                    },
-                ) {
+                if let Err(e) =
+                    state
+                        .notifier
+                        .notify(notifications::NotificationKind::BudgetExceeded {
+                            category: name.clone(),
+                            seconds: *seconds,
+                            budget_secs: budget.daily_budget_secs,
+                        })
+                {
                     eprintln!("attn notify budget_exceeded({name}): {e:#}");
                 }
                 meta_set(&db, &dedup_key, "1")?;
@@ -3184,6 +3730,7 @@ fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result
     let browser_ids = config.browser_app_ids();
     let apps = load_app_status(db, &day_string)?;
     let domains = load_domain_status(db, &day_string, &config.display)?;
+    let media = load_media_status(db, config, day, Utc::now())?;
 
     let watched_non_browser_apps: i64 = apps
         .iter()
@@ -3196,6 +3743,12 @@ fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result
         .map(|d| d.seconds)
         .sum();
     let watch_seconds = watched_non_browser_apps + watched_domains;
+    let media_seconds: i64 = media.iter().map(|item| item.seconds).sum();
+    let video_watch_seconds: i64 = media
+        .iter()
+        .filter(|item| item.category.as_deref() == Some("video"))
+        .map(|item| item.seconds)
+        .sum();
 
     let mut category_totals: BTreeMap<String, i64> = BTreeMap::new();
     for app in &apps {
@@ -3214,12 +3767,24 @@ fn build_day_summary(db: &Connection, config: &Config, day: NaiveDate) -> Result
 
     let mut categories: Vec<CategoryStatus> = category_totals
         .into_iter()
-        .map(|(name, seconds)| CategoryStatus { name, seconds, budget_secs: None, over_budget: false })
+        .map(|(name, seconds)| CategoryStatus {
+            name,
+            seconds,
+            budget_secs: None,
+            over_budget: false,
+        })
         .collect();
     categories.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.name.cmp(&b.name)));
     let tracked_seconds: i64 = categories.iter().map(|c| c.seconds).sum();
 
-    Ok(DaySummary { date: day_string, tracked_seconds, watch_seconds, categories })
+    Ok(DaySummary {
+        date: day_string,
+        tracked_seconds,
+        watch_seconds,
+        media_seconds,
+        video_watch_seconds,
+        categories,
+    })
 }
 
 const UNCATEGORIZED_CAP: usize = 25;
@@ -3232,19 +3797,25 @@ fn build_uncategorized_apps(apps: &[AppStatus], browser_ids: &HashSet<String>) -
     items.sort_by(|a, b| b.seconds.cmp(&a.seconds));
 
     if items.len() <= UNCATEGORIZED_CAP {
-        items.iter().map(|a| AppStatus {
-            id: a.id.clone(),
-            seconds: a.seconds,
-            watched: false,
-            category: None,
-        }).collect()
+        items
+            .iter()
+            .map(|a| AppStatus {
+                id: a.id.clone(),
+                seconds: a.seconds,
+                watched: false,
+                category: None,
+            })
+            .collect()
     } else {
-        let mut result: Vec<AppStatus> = items[..UNCATEGORIZED_CAP].iter().map(|a| AppStatus {
-            id: a.id.clone(),
-            seconds: a.seconds,
-            watched: false,
-            category: None,
-        }).collect();
+        let mut result: Vec<AppStatus> = items[..UNCATEGORIZED_CAP]
+            .iter()
+            .map(|a| AppStatus {
+                id: a.id.clone(),
+                seconds: a.seconds,
+                watched: false,
+                category: None,
+            })
+            .collect();
         let tail_seconds: i64 = items[UNCATEGORIZED_CAP..].iter().map(|a| a.seconds).sum();
         result.push(AppStatus {
             id: "(below threshold)".to_string(),
@@ -3265,19 +3836,25 @@ fn build_uncategorized_domains(domains: &[DomainStatus], min_seconds: i64) -> Ve
     items.sort_by(|a, b| b.seconds.cmp(&a.seconds));
 
     if items.len() <= UNCATEGORIZED_CAP {
-        items.iter().map(|d| DomainStatus {
-            domain: d.domain.clone(),
-            seconds: d.seconds,
-            watched: false,
-            category: None,
-        }).collect()
+        items
+            .iter()
+            .map(|d| DomainStatus {
+                domain: d.domain.clone(),
+                seconds: d.seconds,
+                watched: false,
+                category: None,
+            })
+            .collect()
     } else {
-        let mut result: Vec<DomainStatus> = items[..UNCATEGORIZED_CAP].iter().map(|d| DomainStatus {
-            domain: d.domain.clone(),
-            seconds: d.seconds,
-            watched: false,
-            category: None,
-        }).collect();
+        let mut result: Vec<DomainStatus> = items[..UNCATEGORIZED_CAP]
+            .iter()
+            .map(|d| DomainStatus {
+                domain: d.domain.clone(),
+                seconds: d.seconds,
+                watched: false,
+                category: None,
+            })
+            .collect();
         let tail_seconds: i64 = items[UNCATEGORIZED_CAP..].iter().map(|d| d.seconds).sum();
         result.push(DomainStatus {
             domain: "(below threshold)".to_string(),
@@ -3480,6 +4057,132 @@ fn load_domain_status(
     Ok(domains)
 }
 
+#[derive(Debug)]
+struct MediaAggregate {
+    player_name: String,
+    label: String,
+    domain: Option<String>,
+    seconds: i64,
+    category: Option<String>,
+}
+
+fn load_media_status(
+    db: &Connection,
+    config: &Config,
+    day: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<Vec<MediaStatus>> {
+    let start = local_day_start_utc(day)?;
+    let end = start + Duration::days(1);
+    let effective_end = if day == Local::now().date_naive() {
+        now.min(end).max(start)
+    } else {
+        end
+    };
+    let mut stmt = db.prepare(
+        "SELECT started_at, ended_at, player_name, title, artist, url, domain
+         FROM media_intervals
+         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            end.to_rfc3339(),
+            effective_end.to_rfc3339(),
+            start.to_rfc3339()
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )?;
+
+    let mut aggregates: BTreeMap<String, MediaAggregate> = BTreeMap::new();
+    for row in rows {
+        let (started_at, ended_at, player_name, title, artist, url, domain) = row?;
+        let interval_start = parse_rfc3339_utc(&started_at)?.max(start);
+        let interval_end = ended_at
+            .map(|value| parse_rfc3339_utc(&value))
+            .transpose()?
+            .unwrap_or(effective_end)
+            .min(effective_end)
+            .min(end);
+        if interval_end <= interval_start {
+            continue;
+        }
+
+        let seconds = (interval_end - interval_start).num_seconds();
+        let domain = (!domain.trim().is_empty()).then(|| domain.clone());
+        let category = domain
+            .as_deref()
+            .and_then(|value| config.category_for_domain(value))
+            .or_else(|| config.category_for_app(&player_name));
+        if category.is_none() {
+            continue;
+        }
+        let label = media_label(domain.as_deref(), &title, &artist, &url, &player_name);
+        let key = domain
+            .as_ref()
+            .map(|value| format!("domain:{value}"))
+            .unwrap_or_else(|| format!("player:{player_name}:{}", label));
+
+        let entry = aggregates.entry(key).or_insert_with(|| MediaAggregate {
+            player_name: player_name.clone(),
+            label,
+            domain,
+            seconds: 0,
+            category,
+        });
+        entry.seconds += seconds;
+    }
+
+    let mut media = aggregates
+        .into_values()
+        .map(|item| MediaStatus {
+            player_name: item.player_name,
+            label: item.label,
+            seconds: item.seconds,
+            domain: item.domain,
+            watched: item.category.is_some(),
+            category: item.category,
+        })
+        .collect::<Vec<_>>();
+    media.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    Ok(media)
+}
+
+fn media_label(
+    domain: Option<&str>,
+    title: &str,
+    artist: &str,
+    url: &str,
+    player_name: &str,
+) -> String {
+    if let Some(domain) = domain {
+        return domain.to_string();
+    }
+    if !title.trim().is_empty() && !artist.trim().is_empty() {
+        return format!("{} - {}", title.trim(), artist.trim());
+    }
+    if !title.trim().is_empty() {
+        return title.trim().to_string();
+    }
+    if !url.trim().is_empty() {
+        return url.trim().to_string();
+    }
+    player_name.to_string()
+}
+
 fn import_domains_for_today(state: &AppState) -> Result<()> {
     let config = state.config.lock().unwrap().clone();
     let day = Local::now().date_naive();
@@ -3512,14 +4215,17 @@ struct BrowserImport {
 
 fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Vec<BrowserImport>> {
     let start = local_day_start_utc(day)?;
-    let end = start + Duration::days(1);
+    let end = import_window_end(day, start);
     let mut imports = Vec::new();
 
     for (name, browser) in &config.browsers {
         let reader = match browsers::for_kind(&browser.kind) {
             Some(r) => r,
             None => {
-                eprintln!("attn: unknown browser kind {:?} for {name}, skipping", browser.kind);
+                eprintln!(
+                    "attn: unknown browser kind {:?} for {name}, skipping",
+                    browser.kind
+                );
                 continue;
             }
         };
@@ -3584,23 +4290,43 @@ fn write_domain_imports_for_day(
 ) -> Result<()> {
     let start = local_day_start_utc(day)?;
     let end = start + Duration::days(1);
+    let effective_end = import_window_end(day, start);
 
-    for import in imports {
-        delete_imported_domain_intervals(db, import, start, end)?;
-        for visit in &import.visits {
-            insert_attributed_domain_intervals(
-                db,
-                visit,
-                &import.name,
-                &import.browser,
-                start,
-                end,
-                config.idle_after_secs,
-            )?;
+    db.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<()> {
+        for import in imports {
+            delete_imported_domain_intervals(db, import, start, end)?;
+            for visit in &import.visits {
+                insert_attributed_domain_intervals(
+                    db,
+                    visit,
+                    &import.name,
+                    &import.browser,
+                    start,
+                    effective_end,
+                    config,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    match &result {
+        Ok(_) => db.execute_batch("COMMIT;")?,
+        Err(_) => {
+            let _ = db.execute_batch("ROLLBACK;");
         }
     }
 
-    Ok(())
+    result
+}
+
+fn import_window_end(day: NaiveDate, start: DateTime<Utc>) -> DateTime<Utc> {
+    let end = start + Duration::days(1);
+    if day == Local::now().date_naive() {
+        Utc::now().min(end).max(start)
+    } else {
+        end
+    }
 }
 
 fn delete_imported_domain_intervals(
@@ -3754,7 +4480,7 @@ fn insert_attributed_domain_intervals(
     browser: &BrowserConfig,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
-    idle_after_secs: i64,
+    config: &Config,
 ) -> Result<()> {
     let app_ids = browser
         .app_ids
@@ -3768,7 +4494,7 @@ fn insert_attributed_domain_intervals(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT started_at, ended_at, app_id
+        "SELECT started_at, ended_at, app_id, window_title
          FROM app_intervals
          WHERE app_id IN ({placeholders})
            AND started_at < ?
@@ -3792,21 +4518,41 @@ fn insert_attributed_domain_intervals(
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
         ))
     })?;
 
     for row in rows {
-        let (focus_start, focus_end, app_id) = row?;
+        let (focus_start, focus_end, app_id, window_title) = row?;
+        let title_domain = domain_from_browser_window_title(&window_title)
+            .filter(|domain| is_video_domain(config, domain));
+        let attributed_visit = title_domain
+            .filter(|domain| normalize_domain(domain) != normalize_domain(&visit.domain))
+            .map(|domain| BrowserVisit {
+                started_at: visit.started_at,
+                ended_at: visit.ended_at,
+                url: format!("https://{domain}/"),
+                domain,
+                source_profile: visit.source_profile.clone(),
+            });
+        let visit = attributed_visit.as_ref().unwrap_or(visit);
+        let idle_cap_exempt = is_video_domain(config, &visit.domain);
+
         let raw_focus_start = parse_rfc3339_utc(&focus_start)?;
         let focus_start = raw_focus_start.max(window_start);
-        let focus_end = capped_interval_end(
-            raw_focus_start,
-            focus_end
-                .map(|value| parse_rfc3339_utc(&value))
-                .transpose()?,
-            window_end,
-            idle_after_secs,
-        )
+        let raw_focus_end = focus_end
+            .map(|value| parse_rfc3339_utc(&value))
+            .transpose()?;
+        let focus_end = if idle_cap_exempt {
+            raw_focus_end.unwrap_or(window_end).max(raw_focus_start)
+        } else {
+            capped_interval_end(
+                raw_focus_start,
+                raw_focus_end,
+                window_end,
+                config.idle_after_secs,
+            )
+        }
         .min(window_end);
         let started_at = visit.started_at.max(focus_start);
         let ended_at = visit.ended_at.min(focus_end);
@@ -3817,6 +4563,98 @@ fn insert_attributed_domain_intervals(
     }
 
     Ok(())
+}
+
+fn is_video_domain(config: &Config, domain: &str) -> bool {
+    config.category_for_domain(domain).as_deref() == Some("video")
+}
+
+fn infer_media_domain_from_focus(
+    snapshot: &mut MediaSnapshot,
+    config: &Config,
+    open: Option<&OpenAppInterval>,
+) {
+    if !snapshot.domain.trim().is_empty() {
+        return;
+    }
+    let Some(open) = open else {
+        return;
+    };
+    if !media_player_matches_focused_browser(config, &snapshot.player_name, &open.app_id) {
+        return;
+    }
+    let Some(domain) = domain_from_browser_window_title(&open.window_title) else {
+        return;
+    };
+    if is_video_domain(config, &domain) {
+        snapshot.domain = domain;
+    }
+}
+
+fn should_track_media_snapshot(
+    snapshot: &MediaSnapshot,
+    config: &Config,
+    open: Option<&OpenAppInterval>,
+) -> bool {
+    let Some(open) = open else {
+        return false;
+    };
+    if !media_player_matches_focused_browser(config, &snapshot.player_name, &open.app_id) {
+        return false;
+    }
+    let Some(focused_domain) = domain_from_browser_window_title(&open.window_title) else {
+        return false;
+    };
+    is_video_domain(config, &focused_domain)
+        && normalize_domain(&snapshot.domain) == normalize_domain(&focused_domain)
+}
+
+fn media_player_matches_focused_browser(config: &Config, player_name: &str, app_id: &str) -> bool {
+    let player = normalize_id(player_name);
+    let focused = normalize_id(app_id);
+    config.browsers.iter().any(|(browser_name, browser)| {
+        if !browser
+            .app_ids
+            .iter()
+            .any(|candidate| normalize_id(candidate) == focused)
+        {
+            return false;
+        }
+
+        normalize_id(browser_name) == player
+            || browser.app_ids.iter().any(|candidate| {
+                let candidate = normalize_id(candidate);
+                candidate == player
+                    || candidate.starts_with(&format!("{player}-"))
+                    || player.starts_with(&format!("{candidate}-"))
+            })
+    })
+}
+
+fn domain_from_browser_window_title(title: &str) -> Option<String> {
+    let lower = title.to_ascii_lowercase();
+    for (marker, domain) in [
+        ("youtube", "youtube.com"),
+        ("twitch", "twitch.tv"),
+        ("vimeo", "vimeo.com"),
+        ("netflix", "netflix.com"),
+        ("prime video", "primevideo.com"),
+        ("hulu", "hulu.com"),
+        ("disney+", "disneyplus.com"),
+        ("max", "max.com"),
+        ("nebula", "nebula.tv"),
+        ("kick", "kick.com"),
+        ("dailymotion", "dailymotion.com"),
+        ("rumble", "rumble.com"),
+    ] {
+        if lower == marker
+            || lower.ends_with(&format!(" - {marker}"))
+            || lower.contains(&format!(" - {marker} - "))
+        {
+            return Some(domain.to_string());
+        }
+    }
+    None
 }
 
 fn insert_uncovered_domain_segments(
@@ -3947,14 +4785,21 @@ fn run_doctor() -> Result<()> {
 
     {
         let kind = &config.focus_source.kind;
-        let resolved = if kind == "auto" { focus::auto_detect() } else { kind.as_str() };
+        let resolved = if kind == "auto" {
+            focus::auto_detect()
+        } else {
+            kind.as_str()
+        };
         match focus::build(resolved) {
             Ok(source) => {
                 let probe = source.poll_current();
                 match probe {
                     Ok(_) => println!("focus_source: {} (kind = {kind})", source.name()),
                     Err(error) => {
-                        println!("focus_source: {} (kind = {kind}) — probe failed: {error:#}", source.name());
+                        println!(
+                            "focus_source: {} (kind = {kind}) — probe failed: {error:#}",
+                            source.name()
+                        );
                         warnings.push(format!("focus source probe failed: {error:#}"));
                     }
                 }
@@ -4188,9 +5033,14 @@ fn normalize_id(id: &str) -> String {
     id.trim().to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn domain_matches(domain: &str, candidate: &str) -> bool {
     let domain = normalize_domain(domain);
     let candidate = normalize_domain(candidate);
+    domain_matches_normalized(&domain, &candidate)
+}
+
+fn domain_matches_normalized(domain: &str, candidate: &str) -> bool {
     domain == candidate || domain.ends_with(&format!(".{candidate}"))
 }
 
@@ -4296,6 +5146,7 @@ mod tests {
         let open = OpenAppInterval {
             window_id: Some(1),
             app_id: "com.mitchellh.ghostty".to_string(),
+            window_title: "one".to_string(),
         };
         assert!(open.matches(&FocusedWindow {
             window_id: Some(1),
@@ -4321,20 +5172,53 @@ mod tests {
     fn pick_terminal_subprocess_prefers_most_recent_start_time() {
         let config = Config::default();
         let candidates = vec![
-            DescendantProc { pid: 11, depth: 1, name: "bash".to_string(), start_time: 100 },
-            DescendantProc { pid: 12, depth: 2, name: "claude".to_string(), start_time: 500 },
-            DescendantProc { pid: 13, depth: 3, name: "codex".to_string(), start_time: 300 },
-            DescendantProc { pid: 14, depth: 4, name: "node".to_string(), start_time: 1000 },
+            DescendantProc {
+                pid: 11,
+                depth: 1,
+                name: "bash".to_string(),
+                start_time: 100,
+            },
+            DescendantProc {
+                pid: 12,
+                depth: 2,
+                name: "claude".to_string(),
+                start_time: 500,
+            },
+            DescendantProc {
+                pid: 13,
+                depth: 3,
+                name: "codex".to_string(),
+                start_time: 300,
+            },
+            DescendantProc {
+                pid: 14,
+                depth: 4,
+                name: "node".to_string(),
+                start_time: 1000,
+            },
         ];
-        assert_eq!(pick_terminal_subprocess(&candidates, &config), Some("claude".to_string()));
+        assert_eq!(
+            pick_terminal_subprocess(&candidates, &config),
+            Some("claude".to_string())
+        );
     }
 
     #[test]
     fn pick_terminal_subprocess_returns_none_when_no_match() {
         let config = Config::default();
         let candidates = vec![
-            DescendantProc { pid: 11, depth: 1, name: "bash".to_string(), start_time: 100 },
-            DescendantProc { pid: 12, depth: 2, name: "fish".to_string(), start_time: 200 },
+            DescendantProc {
+                pid: 11,
+                depth: 1,
+                name: "bash".to_string(),
+                start_time: 100,
+            },
+            DescendantProc {
+                pid: 12,
+                depth: 2,
+                name: "fish".to_string(),
+                start_time: 200,
+            },
         ];
         assert_eq!(pick_terminal_subprocess(&candidates, &config), None);
     }
@@ -4350,14 +5234,8 @@ mod tests {
             match_terminal_program_in_title("codex repl", &config),
             Some("codex".to_string())
         );
-        assert_eq!(
-            match_terminal_program_in_title("clauderyx", &config),
-            None
-        );
-        assert_eq!(
-            match_terminal_program_in_title("", &config),
-            None
-        );
+        assert_eq!(match_terminal_program_in_title("clauderyx", &config), None);
+        assert_eq!(match_terminal_program_in_title("", &config), None);
     }
 
     #[test]
@@ -4410,7 +5288,7 @@ mod tests {
             window_id: Some(5),
             app_id: "com.mitchellh.ghostty".to_string(),
             title: "flashscribe".to_string(), // no program marker
-            pid: None, // no pid → /proc walk skipped
+            pid: None,                        // no pid → /proc walk skipped
         };
         let resolved = resolve_focused_window(window, &config, &cache);
         assert_eq!(resolved.app_id, "codex");
@@ -4517,6 +5395,7 @@ mod tests {
         migrate(&db).unwrap();
         assert!(table_column_exists(&db, "app_intervals", "window_id").unwrap());
         assert!(table_column_exists(&db, "domain_intervals", "browser_name").unwrap());
+        assert!(table_column_exists(&db, "media_intervals", "playback_id").unwrap());
     }
 
     #[test]
@@ -4548,8 +5427,14 @@ mod tests {
     #[test]
     fn config_default_uses_generated_default_toml() {
         let config = Config::default();
-        assert_eq!(config.category_for_app("positron"), Some("coding".to_string()));
-        assert_eq!(config.category_for_domain("vercel.com"), Some("coding".to_string()));
+        assert_eq!(
+            config.category_for_app("positron"),
+            Some("coding".to_string())
+        );
+        assert_eq!(
+            config.category_for_domain("vercel.com"),
+            Some("coding".to_string())
+        );
     }
 
     #[test]
@@ -4569,13 +5454,22 @@ mod tests {
         let config = Config::load_from_path(&path).unwrap();
         let _ = fs::remove_file(&path);
 
-        assert_eq!(config.category_for_app("my-editor"), Some("coding".to_string()));
-        assert_eq!(config.category_for_app("positron"), Some("coding".to_string()));
+        assert_eq!(
+            config.category_for_app("my-editor"),
+            Some("coding".to_string())
+        );
+        assert_eq!(
+            config.category_for_app("positron"),
+            Some("coding".to_string())
+        );
         assert_eq!(
             config.category_for_domain("example.edu"),
             Some("learning".to_string())
         );
-        assert_eq!(config.category_for_domain("vercel.com"), Some("coding".to_string()));
+        assert_eq!(
+            config.category_for_domain("vercel.com"),
+            Some("coding".to_string())
+        );
     }
 
     #[test]
@@ -4597,6 +5491,10 @@ mod tests {
     fn attribution_clips_domain_visits_to_browser_focus() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
+        let config = Config {
+            idle_after_secs: 1200,
+            ..Default::default()
+        };
         let browser = BrowserConfig {
             app_ids: vec!["brave-browser".to_string()],
             history_paths: Vec::new(),
@@ -4625,7 +5523,7 @@ mod tests {
             &browser,
             focus_start - Duration::hours(1),
             focus_end + Duration::hours(1),
-            1200,
+            &config,
         )
         .unwrap();
 
@@ -4644,6 +5542,10 @@ mod tests {
     fn attribution_caps_browser_focus_at_idle_threshold() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
+        let config = Config {
+            idle_after_secs: 300,
+            ..Default::default()
+        };
         let browser = BrowserConfig {
             app_ids: vec!["brave-browser".to_string()],
             history_paths: Vec::new(),
@@ -4661,8 +5563,8 @@ mod tests {
         let visit = BrowserVisit {
             started_at: focus_start,
             ended_at: focus_start + Duration::minutes(30),
-            url: "https://www.youtube.com/watch?v=test".to_string(),
-            domain: "youtube.com".to_string(),
+            url: "https://example.com/".to_string(),
+            domain: "example.com".to_string(),
             source_profile: "Default".to_string(),
         };
         insert_attributed_domain_intervals(
@@ -4672,7 +5574,7 @@ mod tests {
             &browser,
             focus_start - Duration::hours(1),
             focus_end + Duration::hours(1),
-            300,
+            &config,
         )
         .unwrap();
 
@@ -4687,6 +5589,114 @@ mod tests {
         assert_eq!(seconds, 300);
     }
 
+    #[test]
+    fn browser_window_title_overrides_stale_history_for_video_domain() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let config = Config {
+            idle_after_secs: 300,
+            ..Default::default()
+        };
+        let browser = BrowserConfig {
+            app_ids: vec!["brave-browser".to_string()],
+            history_paths: Vec::new(),
+            kind: "chromium".to_string(),
+        };
+        let focus_start = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let focus_end = focus_start + Duration::minutes(30);
+        db.execute(
+            "INSERT INTO app_intervals(started_at, ended_at, app_id, window_title)
+             VALUES (?1, ?2, 'brave-browser', 'Shadow Integration - YouTube - Brave')",
+            params![focus_start.to_rfc3339(), focus_end.to_rfc3339()],
+        )
+        .unwrap();
+
+        let imports = vec![BrowserImport {
+            name: "brave".to_string(),
+            browser,
+            successful_profiles: vec!["Default".to_string()],
+            visits: vec![BrowserVisit {
+                started_at: focus_start,
+                ended_at: focus_end,
+                url: "https://twitter.com/?lang=de".to_string(),
+                domain: "twitter.com".to_string(),
+                source_profile: "Default".to_string(),
+            }],
+        }];
+
+        write_domain_imports_for_day(
+            &db,
+            &config,
+            focus_start.with_timezone(&Local).date_naive(),
+            &imports,
+        )
+        .unwrap();
+
+        let row: (String, i64) = db
+            .query_row(
+                "SELECT domain, CAST(SUM((julianday(ended_at) - julianday(started_at)) * 86400) AS INTEGER)
+                 FROM domain_intervals
+                 GROUP BY domain",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("youtube.com".to_string(), 1800));
+    }
+
+    #[test]
+    fn video_domain_imports_use_full_browser_focus_interval() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let config = Config {
+            idle_after_secs: 300,
+            ..Default::default()
+        };
+        let browser = BrowserConfig {
+            app_ids: vec!["brave-browser".to_string()],
+            history_paths: Vec::new(),
+            kind: "chromium".to_string(),
+        };
+        let focus_start = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let focus_end = focus_start + Duration::minutes(30);
+        db.execute(
+            "INSERT INTO app_intervals(started_at, ended_at, app_id, window_title)
+             VALUES (?1, ?2, 'brave-browser', 'YouTube')",
+            params![focus_start.to_rfc3339(), focus_end.to_rfc3339()],
+        )
+        .unwrap();
+
+        let imports = vec![BrowserImport {
+            name: "brave".to_string(),
+            browser,
+            successful_profiles: vec!["Default".to_string()],
+            visits: vec![BrowserVisit {
+                started_at: focus_start,
+                ended_at: focus_end,
+                url: "https://www.youtube.com/watch?v=test".to_string(),
+                domain: "youtube.com".to_string(),
+                source_profile: "Default".to_string(),
+            }],
+        }];
+
+        write_domain_imports_for_day(
+            &db,
+            &config,
+            focus_start.with_timezone(&Local).date_naive(),
+            &imports,
+        )
+        .unwrap();
+
+        let seconds: i64 = db
+            .query_row(
+                "SELECT CAST(SUM((julianday(ended_at) - julianday(started_at)) * 86400) AS INTEGER)
+                 FROM domain_intervals",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(seconds, 1800);
+    }
 
     #[test]
     fn overlapping_domain_intervals_do_not_exceed_browser_focus_time() {
@@ -4728,7 +5738,10 @@ mod tests {
             &browser,
             focus_start - Duration::hours(1),
             focus_end + Duration::hours(1),
-            1200,
+            &Config {
+                idle_after_secs: 1200,
+                ..Default::default()
+            },
         )
         .unwrap();
         insert_attributed_domain_intervals(
@@ -4738,7 +5751,10 @@ mod tests {
             &browser,
             focus_start - Duration::hours(1),
             focus_end + Duration::hours(1),
-            1200,
+            &Config {
+                idle_after_secs: 1200,
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -5046,7 +6062,7 @@ mod tests {
         }
 
         let state = AppState {
-            config: Arc::new(Mutex::new(old_config.clone())),
+            config: Arc::new(Mutex::new(Arc::new(old_config.clone()))),
             db: Arc::new(Mutex::new(old_db)),
             db_state_path: Arc::new(Mutex::new(old_config.state_path.clone())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5095,7 +6111,7 @@ mod tests {
             ..Default::default()
         };
         let state = AppState {
-            config: Arc::new(Mutex::new(old_config.clone())),
+            config: Arc::new(Mutex::new(Arc::new(old_config.clone()))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(new_config.state_path.clone())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5197,7 +6213,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(Config::default())),
+            config: Arc::new(Mutex::new(Arc::new(Config::default()))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5225,7 +6241,7 @@ mod tests {
         persist_pause_state(&db, Some(idle_pause)).unwrap();
 
         let state = AppState {
-            config: Arc::new(Mutex::new(Config::default())),
+            config: Arc::new(Mutex::new(Arc::new(Config::default()))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5264,7 +6280,7 @@ mod tests {
         };
         persist_pause_state(&db, Some(info)).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5283,12 +6299,18 @@ mod tests {
         };
         handle_focus_change_with(&state, Some(window)).unwrap();
 
-        assert!(state.tracking_state.lock().unwrap().is_none(), "manual pause should auto-clear");
+        assert!(
+            state.tracking_state.lock().unwrap().is_none(),
+            "manual pause should auto-clear"
+        );
         let persisted = {
             let db = state.db.lock().unwrap();
             meta_get(&db, "paused_reason").unwrap()
         };
-        assert!(persisted.is_none(), "persisted pause_reason should be cleared");
+        assert!(
+            persisted.is_none(),
+            "persisted pause_reason should be cleared"
+        );
     }
 
     #[test]
@@ -5304,7 +6326,7 @@ mod tests {
         };
         persist_pause_state(&db, Some(info)).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5323,7 +6345,10 @@ mod tests {
         };
         handle_focus_change_with(&state, Some(window)).unwrap();
 
-        assert!(state.tracking_state.lock().unwrap().is_some(), "manual pause should persist before min_break");
+        assert!(
+            state.tracking_state.lock().unwrap().is_some(),
+            "manual pause should persist before min_break"
+        );
     }
 
     #[test]
@@ -5344,7 +6369,7 @@ mod tests {
     }
 
     #[test]
-    fn chromium_reader_extracts_domains_and_caps_long_durations() {
+    fn chromium_reader_extracts_domains_and_keeps_long_durations() {
         const CHROME_EPOCH_OFFSET_MICROS: i64 = 11_644_473_600_000_000;
 
         let path = unique_temp_db_path("attn-history-reader");
@@ -5392,7 +6417,7 @@ mod tests {
         assert_eq!(visits[0].domain, "youtube.com");
         assert_eq!(
             (visits[0].ended_at - visits[0].started_at).num_seconds(),
-            900
+            3600
         );
     }
 
@@ -5433,6 +6458,180 @@ mod tests {
         let status = build_status(&db, &config, true).unwrap();
         assert_eq!(status.watch_seconds, 120);
         assert!(status.tracked_seconds >= 0);
+    }
+
+    #[test]
+    fn status_reports_media_watch_seconds_separately() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let config = Config::default();
+        let now = Utc::now();
+        let started_at = now - Duration::seconds(120);
+        let ended_at = now - Duration::seconds(60);
+
+        db.execute(
+            "INSERT INTO media_intervals(
+                started_at, ended_at, playback_id, player_name, title, artist, url, domain, source
+             ) VALUES (?1, ?2, 'org.mpris.MediaPlayer2.brave.instance1', 'brave', 'Video A', '', ?3, 'youtube.com', 'mpris')",
+            params![
+                started_at.to_rfc3339(),
+                ended_at.to_rfc3339(),
+                "https://www.youtube.com/watch?v=a"
+            ],
+        )
+        .unwrap();
+
+        let status = build_status(&db, &config, true).unwrap();
+        assert_eq!(status.watch_seconds, 0);
+        assert_eq!(status.media_seconds, 60);
+        assert_eq!(status.video_watch_seconds, 60);
+        assert_eq!(status.media.len(), 1);
+        assert_eq!(status.media[0].domain.as_deref(), Some("youtube.com"));
+        assert_eq!(status.media[0].category.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn status_omits_uncategorized_media_audio() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let now = Utc::now();
+
+        db.execute(
+            "INSERT INTO media_intervals(
+                started_at, ended_at, playback_id, player_name, title, artist, url, domain, source
+             ) VALUES (?1, ?2, 'org.mpris.MediaPlayer2.brave.instance1', 'brave', 'Audio Track', '', '', '', 'mpris')",
+            params![
+                (now - Duration::seconds(120)).to_rfc3339(),
+                (now - Duration::seconds(60)).to_rfc3339(),
+            ],
+        )
+        .unwrap();
+
+        let status = build_status(&db, &Config::default(), true).unwrap();
+        assert_eq!(status.media_seconds, 0);
+        assert_eq!(status.video_watch_seconds, 0);
+        assert!(status.media.is_empty());
+    }
+
+    #[test]
+    fn media_snapshot_infers_video_domain_from_focused_browser_title() {
+        let config = Config::default();
+        let open = OpenAppInterval {
+            window_id: Some(1),
+            app_id: "brave-browser".to_string(),
+            window_title: "Shadow Integration - YouTube - Brave".to_string(),
+        };
+        let mut snapshot = MediaSnapshot {
+            playback_id: "org.mpris.MediaPlayer2.brave.instance1".to_string(),
+            player_name: "brave".to_string(),
+            title: "Shadow Integration".to_string(),
+            artist: "Curio Subs".to_string(),
+            url: String::new(),
+            domain: String::new(),
+            source: "mpris".to_string(),
+        };
+
+        infer_media_domain_from_focus(&mut snapshot, &config, Some(&open));
+
+        assert_eq!(snapshot.domain, "youtube.com");
+        assert!(should_track_media_snapshot(&snapshot, &config, Some(&open)));
+    }
+
+    #[test]
+    fn media_snapshot_does_not_track_background_audio() {
+        let config = Config::default();
+        let open = OpenAppInterval {
+            window_id: Some(1),
+            app_id: "codex".to_string(),
+            window_title: "attn".to_string(),
+        };
+        let snapshot = MediaSnapshot {
+            playback_id: "org.mpris.MediaPlayer2.brave.instance1".to_string(),
+            player_name: "brave".to_string(),
+            title: "Audio Track".to_string(),
+            artist: String::new(),
+            url: String::new(),
+            domain: String::new(),
+            source: "mpris".to_string(),
+        };
+
+        assert!(!should_track_media_snapshot(
+            &snapshot,
+            &config,
+            Some(&open)
+        ));
+    }
+
+    #[test]
+    fn media_snapshot_sync_rolls_intervals_on_media_change() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let snapshot = MediaSnapshot {
+            playback_id: "org.mpris.MediaPlayer2.brave.instance1".to_string(),
+            player_name: "brave".to_string(),
+            title: "Video A".to_string(),
+            artist: String::new(),
+            url: "https://www.youtube.com/watch?v=a".to_string(),
+            domain: "youtube.com".to_string(),
+            source: "mpris".to_string(),
+        };
+
+        sync_media_snapshots(&db, start, std::slice::from_ref(&snapshot)).unwrap();
+        sync_media_snapshots(
+            &db,
+            start + Duration::minutes(5),
+            std::slice::from_ref(&snapshot),
+        )
+        .unwrap();
+
+        let open_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM media_intervals WHERE ended_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(open_count, 1);
+
+        let changed = MediaSnapshot {
+            title: "Video B".to_string(),
+            url: "https://www.youtube.com/watch?v=b".to_string(),
+            ..snapshot
+        };
+        sync_media_snapshots(
+            &db,
+            start + Duration::minutes(10),
+            std::slice::from_ref(&changed),
+        )
+        .unwrap();
+        sync_media_snapshots(&db, start + Duration::minutes(20), &[]).unwrap();
+
+        let rows = db
+            .prepare("SELECT title, started_at, ended_at FROM media_intervals ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "Video A");
+        assert_eq!(
+            rows[0].2.as_deref(),
+            Some((start + Duration::minutes(10)).to_rfc3339().as_str())
+        );
+        assert_eq!(rows[1].0, "Video B");
+        assert_eq!(
+            rows[1].2.as_deref(),
+            Some((start + Duration::minutes(20)).to_rfc3339().as_str())
+        );
     }
 
     #[test]
@@ -5538,7 +6737,7 @@ mod tests {
 
     #[test]
     fn category_status_not_over_budget_when_no_budget() {
-        let over = None::<i64>.map_or(false, |b: i64| 9999_i64 >= b);
+        let over = None::<i64>.is_some_and(|b: i64| 9999_i64 >= b);
         assert!(!over);
     }
 
@@ -5551,7 +6750,10 @@ mod tests {
             over_budget: false,
         };
         let json = serde_json::to_string(&cs).unwrap();
-        assert!(!json.contains("over_budget"), "over_budget should be omitted when false: {json}");
+        assert!(
+            !json.contains("over_budget"),
+            "over_budget should be omitted when false: {json}"
+        );
     }
 
     #[test]
@@ -5563,7 +6765,10 @@ mod tests {
             over_budget: true,
         };
         let json = serde_json::to_string(&cs).unwrap();
-        assert!(json.contains("\"over_budget\":true"), "over_budget:true should appear in JSON: {json}");
+        assert!(
+            json.contains("\"over_budget\":true"),
+            "over_budget:true should appear in JSON: {json}"
+        );
     }
 
     #[test]
@@ -5588,7 +6793,9 @@ mod tests {
         let mut config = Config::default();
         config.budgets.insert(
             "scroll".to_string(),
-            BudgetEntry { daily_budget_secs: 30 },
+            BudgetEntry {
+                daily_budget_secs: 30,
+            },
         );
         config.notifications.enabled = true;
         config.notifications.budget_exceeded = true;
@@ -5604,7 +6811,7 @@ mod tests {
         .unwrap();
 
         let state = AppState {
-            config: Arc::new(Mutex::new(config.clone())),
+            config: Arc::new(Mutex::new(Arc::new(config.clone()))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5619,7 +6826,11 @@ mod tests {
             run_notification_check(&state).unwrap();
         }
 
-        assert_eq!(rec.call_count(), 1, "budget notification should fire exactly once");
+        assert_eq!(
+            rec.call_count(),
+            1,
+            "budget notification should fire exactly once"
+        );
     }
 
     #[test]
@@ -5647,7 +6858,7 @@ mod tests {
         config.breaks.min_break_secs = 300;
 
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5661,7 +6872,11 @@ mod tests {
         run_notification_check(&state).unwrap();
         run_notification_check(&state).unwrap();
 
-        assert_eq!(rec.call_count(), 1, "break-overdue should fire once per session");
+        assert_eq!(
+            rec.call_count(),
+            1,
+            "break-overdue should fire once per session"
+        );
     }
 
     #[test]
@@ -5689,7 +6904,7 @@ mod tests {
         config.breaks.min_break_secs = 300;
 
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5731,7 +6946,11 @@ mod tests {
         }
 
         run_notification_check(&state).unwrap();
-        assert_eq!(rec.call_count(), 2, "break-overdue should refire after break");
+        assert_eq!(
+            rec.call_count(),
+            2,
+            "break-overdue should refire after break"
+        );
     }
 
     // ----- Phase 5: uncategorized + categorize tests -----
@@ -5740,9 +6959,24 @@ mod tests {
     fn uncategorized_apps_filters_watched_and_low_seconds() {
         let browser_ids: HashSet<String> = HashSet::new();
         let apps = vec![
-            AppStatus { id: "firefox".to_string(), seconds: 120, watched: false, category: None },
-            AppStatus { id: "code".to_string(), seconds: 500, watched: true, category: Some("coding".to_string()) },
-            AppStatus { id: "tiny".to_string(), seconds: 30, watched: false, category: None },
+            AppStatus {
+                id: "firefox".to_string(),
+                seconds: 120,
+                watched: false,
+                category: None,
+            },
+            AppStatus {
+                id: "code".to_string(),
+                seconds: 500,
+                watched: true,
+                category: Some("coding".to_string()),
+            },
+            AppStatus {
+                id: "tiny".to_string(),
+                seconds: 30,
+                watched: false,
+                category: None,
+            },
         ];
         let result = build_uncategorized_apps(&apps, &browser_ids);
         assert_eq!(result.len(), 1);
@@ -5754,8 +6988,18 @@ mod tests {
         let mut browser_ids = HashSet::new();
         browser_ids.insert("brave-browser".to_string());
         let apps = vec![
-            AppStatus { id: "brave-browser".to_string(), seconds: 600, watched: false, category: None },
-            AppStatus { id: "mpv".to_string(), seconds: 120, watched: false, category: None },
+            AppStatus {
+                id: "brave-browser".to_string(),
+                seconds: 600,
+                watched: false,
+                category: None,
+            },
+            AppStatus {
+                id: "mpv".to_string(),
+                seconds: 120,
+                watched: false,
+                category: None,
+            },
         ];
         let result = build_uncategorized_apps(&apps, &browser_ids);
         assert_eq!(result.len(), 1);
@@ -5787,9 +7031,24 @@ mod tests {
     #[test]
     fn uncategorized_domains_filters_watched_and_below_min() {
         let domains = vec![
-            DomainStatus { domain: "example.com".to_string(), seconds: 60, watched: false, category: None },
-            DomainStatus { domain: "github.com".to_string(), seconds: 200, watched: true, category: Some("coding".to_string()) },
-            DomainStatus { domain: "tiny.io".to_string(), seconds: 5, watched: false, category: None },
+            DomainStatus {
+                domain: "example.com".to_string(),
+                seconds: 60,
+                watched: false,
+                category: None,
+            },
+            DomainStatus {
+                domain: "github.com".to_string(),
+                seconds: 200,
+                watched: true,
+                category: Some("coding".to_string()),
+            },
+            DomainStatus {
+                domain: "tiny.io".to_string(),
+                seconds: 5,
+                watched: false,
+                category: None,
+            },
         ];
         let result = build_uncategorized_domains(&domains, 30);
         assert_eq!(result.len(), 1);
@@ -5821,7 +7080,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5848,8 +7107,11 @@ mod tests {
             updated_at: "2026-05-15T12:00:00+00:00".to_string(),
             watch_seconds: 0,
             tracked_seconds: 0,
+            media_seconds: 0,
+            video_watch_seconds: 0,
             apps: vec![],
             domains: vec![],
+            media: vec![],
             categories: vec![],
             days: vec![],
             active_session_seconds: 0,
@@ -5868,8 +7130,14 @@ mod tests {
             focus_source_kind: "niri".to_string(),
         };
         let json = serde_json::to_string(&status).unwrap();
-        assert!(!json.contains("uncategorized_apps"), "empty vec should be omitted");
-        assert!(!json.contains("uncategorized_domains"), "empty vec should be omitted");
+        assert!(
+            !json.contains("uncategorized_apps"),
+            "empty vec should be omitted"
+        );
+        assert!(
+            !json.contains("uncategorized_domains"),
+            "empty vec should be omitted"
+        );
     }
 
     #[test]
@@ -5879,8 +7147,11 @@ mod tests {
             updated_at: "2026-05-15T12:00:00+00:00".to_string(),
             watch_seconds: 0,
             tracked_seconds: 0,
+            media_seconds: 0,
+            video_watch_seconds: 0,
             apps: vec![],
             domains: vec![],
+            media: vec![],
             categories: vec![],
             days: vec![],
             active_session_seconds: 0,
@@ -5891,7 +7162,12 @@ mod tests {
             breaks_enabled: true,
             breaks_interval_secs: 3600,
             breaks_min_break_secs: 300,
-            uncategorized_apps: vec![AppStatus { id: "obs".to_string(), seconds: 120, watched: false, category: None }],
+            uncategorized_apps: vec![AppStatus {
+                id: "obs".to_string(),
+                seconds: 120,
+                watched: false,
+                category: None,
+            }],
             uncategorized_domains: vec![],
             notifications_enabled: true,
             notifications_break_overdue: true,
@@ -5909,7 +7185,11 @@ mod tests {
     fn handle_set_budget_updates_existing_budget() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
-        fs::write(&path, "[apps.watch]\ncoding = [\"code\"]\n\n[budgets.coding]\ndaily_budget_secs = 1800\n").unwrap();
+        fs::write(
+            &path,
+            "[apps.watch]\ncoding = [\"code\"]\n\n[budgets.coding]\ndaily_budget_secs = 1800\n",
+        )
+        .unwrap();
 
         let mut watch = BTreeMap::new();
         watch.insert("coding".to_string(), vec!["code".to_string()]);
@@ -5920,7 +7200,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5933,13 +7213,22 @@ mod tests {
 
         // Temporarily override DEFAULT_CONFIG_PATH by writing to the test path and using it directly.
         // We test the handler logic via toml_edit round-trip.
-        let req = SetBudgetRequest { category: "coding".to_string(), daily_budget_secs: 3600 };
+        let req = SetBudgetRequest {
+            category: "coding".to_string(),
+            daily_budget_secs: 3600,
+        };
         // Inline the toml_edit logic to test it without needing the real config path.
         let raw = fs::read_to_string(&path).unwrap();
-        use toml_edit::{DocumentMut, value};
+        use toml_edit::{value, DocumentMut};
         let mut doc = raw.parse::<DocumentMut>().unwrap();
-        let budgets = doc.get_mut("budgets").and_then(|b| b.as_table_mut()).unwrap();
-        let entry = budgets.get_mut("coding").and_then(|e| e.as_table_mut()).unwrap();
+        let budgets = doc
+            .get_mut("budgets")
+            .and_then(|b| b.as_table_mut())
+            .unwrap();
+        let entry = budgets
+            .get_mut("coding")
+            .and_then(|e| e.as_table_mut())
+            .unwrap();
         entry.insert("daily_budget_secs", value(req.daily_budget_secs));
         let out = doc.to_string();
         assert!(out.contains("daily_budget_secs = 3600"));
@@ -5957,7 +7246,10 @@ mod tests {
             budgets.remove("coding");
         }
         let out = doc.to_string();
-        assert!(!out.contains("daily_budget_secs"), "budget entry should be removed");
+        assert!(
+            !out.contains("daily_budget_secs"),
+            "budget entry should be removed"
+        );
         assert!(out.contains("[apps.watch]"), "unrelated sections preserved");
     }
 
@@ -5972,7 +7264,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -5982,7 +7274,10 @@ mod tests {
             notifier: Arc::new(notifications::NullNotifier),
             terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
-        let req = SetBudgetRequest { category: "nonexistent".to_string(), daily_budget_secs: 3600 };
+        let req = SetBudgetRequest {
+            category: "nonexistent".to_string(),
+            daily_budget_secs: 3600,
+        };
         let resp = handle_set_budget(&state, req).unwrap();
         assert!(!resp.ok);
         assert!(resp.error.as_deref().unwrap_or("").contains("not found"));
@@ -5993,15 +7288,24 @@ mod tests {
     #[test]
     fn handle_set_notifications_writes_only_provided_fields() {
         let raw = "[notifications]\nenabled = true\nbreak_overdue = true\nbudget_exceeded = true\n";
-        use toml_edit::{DocumentMut, value};
+        use toml_edit::{value, DocumentMut};
         let mut doc = raw.parse::<DocumentMut>().unwrap();
         // Simulate: only set enabled = false, leave others unchanged.
-        let notif = doc.get_mut("notifications").and_then(|n| n.as_table_mut()).unwrap();
+        let notif = doc
+            .get_mut("notifications")
+            .and_then(|n| n.as_table_mut())
+            .unwrap();
         notif.insert("enabled", value(false));
         let out = doc.to_string();
         assert!(out.contains("enabled = false"));
-        assert!(out.contains("break_overdue = true"), "untouched field preserved");
-        assert!(out.contains("budget_exceeded = true"), "untouched field preserved");
+        assert!(
+            out.contains("break_overdue = true"),
+            "untouched field preserved"
+        );
+        assert!(
+            out.contains("budget_exceeded = true"),
+            "untouched field preserved"
+        );
     }
 
     // ── set_focus_source tests ────────────────────────────────────────────────
@@ -6011,7 +7315,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let state = AppState {
-            config: Arc::new(Mutex::new(Config::default())),
+            config: Arc::new(Mutex::new(Arc::new(Config::default()))),
             db: Arc::new(Mutex::new(db)),
             db_state_path: Arc::new(Mutex::new(default_state_path())),
             socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
@@ -6021,7 +7325,9 @@ mod tests {
             notifier: Arc::new(notifications::NullNotifier),
             terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
         };
-        let req = SetFocusSourceRequest { kind: "gnome".to_string() };
+        let req = SetFocusSourceRequest {
+            kind: "gnome".to_string(),
+        };
         let resp = handle_set_focus_source(&state, req).unwrap();
         assert!(!resp.ok);
         assert!(resp.error.as_deref().unwrap_or("").contains("invalid kind"));
@@ -6044,8 +7350,11 @@ mod tests {
             updated_at: "2026-05-15T12:00:00+00:00".to_string(),
             watch_seconds: 0,
             tracked_seconds: 0,
+            media_seconds: 0,
+            video_watch_seconds: 0,
             apps: vec![],
             domains: vec![],
+            media: vec![],
             categories: vec![],
             days: vec![],
             active_session_seconds: 0,

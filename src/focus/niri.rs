@@ -112,8 +112,7 @@ fn poll_focused_window() -> Result<Option<FocusedWindow>> {
         return Ok(None);
     };
     let window_id = json_find_i64(&value, &["id", "window_id", "window-id", "windowId"]);
-    let title =
-        json_find_string(&value, &["title", "window_title", "name"]).unwrap_or_default();
+    let title = json_find_string(&value, &["title", "window_title", "name"]).unwrap_or_default();
     let pid = json_find_i64(&value, &["pid", "process_id", "processId"])
         .and_then(|v| i32::try_from(v).ok());
     Ok(Some(FocusedWindow {

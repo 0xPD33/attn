@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use url::Url;
 
-use super::{BrowserReader, BrowserVisit};
+use super::{normalize_visit_ranges, BrowserReader, BrowserVisit};
 
 pub struct FirefoxReader;
 
@@ -59,13 +59,9 @@ impl BrowserReader for FirefoxReader {
                 continue;
             };
             let started_at = prtime_to_utc(prtime)?;
-            // Firefox does not record visit duration. Use 0 — the downstream
-            // insert_attributed_domain_intervals clips each visit to the focus
-            // window containing its timestamp, so this is safe.
+            // Firefox does not record visit duration. The shared normalizer
+            // extends timestamp-only visits to the next visit/import boundary.
             let ended_at = started_at;
-            if started_at < since || started_at >= until {
-                continue;
-            }
             visits.push(BrowserVisit {
                 started_at,
                 ended_at,
@@ -74,7 +70,7 @@ impl BrowserReader for FirefoxReader {
                 source_profile: source_profile.clone(),
             });
         }
-        Ok(visits)
+        Ok(normalize_visit_ranges(visits, since, until))
     }
 }
 
@@ -181,7 +177,11 @@ mod tests {
             v0.started_at,
             Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap()
         );
-        assert_eq!(v0.started_at, v0.ended_at, "duration should be 0 for firefox");
+        assert_eq!(
+            (v0.ended_at - v0.started_at).num_seconds(),
+            60,
+            "Firefox visits should extend to the next visit"
+        );
 
         let v1 = &visits[1];
         assert_eq!(v1.domain, "rust-lang.org");
@@ -189,15 +189,17 @@ mod tests {
             v1.started_at,
             Utc.with_ymd_and_hms(2026, 5, 11, 10, 1, 0).unwrap()
         );
+        assert_eq!(
+            (v1.ended_at - v1.started_at).num_seconds(),
+            4 * 60,
+            "last Firefox visit should extend to the import boundary"
+        );
     }
 
     #[test]
     fn firefox_reader_filters_outside_window() {
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "attn-firefox-filter-{}.sqlite",
-            std::process::id()
-        ));
+        path.push(format!("attn-firefox-filter-{}.sqlite", std::process::id()));
         build_fixture_db(&path);
 
         let reader = FirefoxReader;
@@ -207,6 +209,9 @@ mod tests {
         let visits = reader.read_visits(&path, since, until).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        assert!(visits.is_empty(), "visits outside window should be filtered");
+        assert!(
+            visits.is_empty(),
+            "visits outside window should be filtered"
+        );
     }
 }

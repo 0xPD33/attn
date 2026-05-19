@@ -32,3 +32,40 @@ pub fn for_kind(kind: &str) -> Option<Box<dyn BrowserReader>> {
         _ => None,
     }
 }
+
+pub(crate) fn normalize_visit_ranges(
+    mut visits: Vec<BrowserVisit>,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Vec<BrowserVisit> {
+    visits.sort_by_key(|visit| visit.started_at);
+    let starts = visits
+        .iter()
+        .map(|visit| visit.started_at)
+        .collect::<Vec<_>>();
+
+    for (index, visit) in visits.iter_mut().enumerate() {
+        let next_start = starts.get(index + 1).copied();
+        if visit.ended_at <= visit.started_at {
+            visit.ended_at = next_start
+                .filter(|next| *next > visit.started_at)
+                .unwrap_or_else(|| {
+                    if visit.started_at >= since {
+                        until
+                    } else {
+                        visit.started_at
+                    }
+                });
+        } else if let Some(next) = next_start {
+            if next > visit.started_at && next < visit.ended_at {
+                visit.ended_at = next;
+            }
+        }
+    }
+
+    visits
+        .into_iter()
+        .filter(|visit| visit.ended_at > visit.started_at)
+        .filter(|visit| visit.ended_at > since && visit.started_at < until)
+        .collect()
+}

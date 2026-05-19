@@ -4,43 +4,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use url::Url;
 
-use super::{BrowserReader, BrowserVisit};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
-
-    #[test]
-    fn visits_are_capped_at_next_visit_start() {
-        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
-        let visits = cap_visits_at_next_start(vec![
-            BrowserVisit {
-                started_at,
-                ended_at: started_at + Duration::minutes(10),
-                url: "https://youtube.com/".to_string(),
-                domain: "youtube.com".to_string(),
-                source_profile: "Default".to_string(),
-            },
-            BrowserVisit {
-                started_at: started_at + Duration::minutes(5),
-                ended_at: started_at + Duration::minutes(15),
-                url: "https://reddit.com/".to_string(),
-                domain: "reddit.com".to_string(),
-                source_profile: "Default".to_string(),
-            },
-        ]);
-
-        assert_eq!(
-            (visits[0].ended_at - visits[0].started_at).num_seconds(),
-            300
-        );
-        assert_eq!(
-            (visits[1].ended_at - visits[1].started_at).num_seconds(),
-            600
-        );
-    }
-}
+use super::{normalize_visit_ranges, BrowserReader, BrowserVisit};
 
 const CHROME_EPOCH_OFFSET_MICROS: i64 = 11_644_473_600_000_000;
 
@@ -87,11 +51,11 @@ impl BrowserReader for ChromiumReader {
                 continue;
             };
             let started_at = chrome_micros_to_utc(visit_time)?;
-            let duration_secs = (visit_duration / 1_000_000).clamp(1, 900);
-            let ended_at = started_at + Duration::seconds(duration_secs);
-            if ended_at <= since || started_at >= until {
-                continue;
-            }
+            let ended_at = if visit_duration > 0 {
+                started_at + Duration::microseconds(visit_duration)
+            } else {
+                started_at
+            };
             visits.push(BrowserVisit {
                 started_at,
                 ended_at,
@@ -100,7 +64,7 @@ impl BrowserReader for ChromiumReader {
                 source_profile: source_profile_from_path(profile_db),
             });
         }
-        Ok(cap_visits_at_next_start(visits))
+        Ok(normalize_visit_ranges(visits, since, until))
     }
 }
 
@@ -138,23 +102,72 @@ fn source_profile_from_path(path: &Path) -> String {
         .to_string()
 }
 
-pub(crate) fn cap_visits_at_next_start(mut visits: Vec<BrowserVisit>) -> Vec<BrowserVisit> {
-    visits.sort_by_key(|visit| visit.started_at);
-    let starts = visits
-        .iter()
-        .map(|visit| visit.started_at)
-        .collect::<Vec<_>>();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
 
-    for (index, visit) in visits.iter_mut().enumerate() {
-        if let Some(next_start) = starts.get(index + 1) {
-            if *next_start > visit.started_at && *next_start < visit.ended_at {
-                visit.ended_at = *next_start;
-            }
-        }
+    #[test]
+    fn visits_are_capped_at_next_visit_start() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let visits = normalize_visit_ranges(
+            vec![
+                BrowserVisit {
+                    started_at,
+                    ended_at: started_at + Duration::minutes(10),
+                    url: "https://youtube.com/".to_string(),
+                    domain: "youtube.com".to_string(),
+                    source_profile: "Default".to_string(),
+                },
+                BrowserVisit {
+                    started_at: started_at + Duration::minutes(5),
+                    ended_at: started_at + Duration::minutes(15),
+                    url: "https://reddit.com/".to_string(),
+                    domain: "reddit.com".to_string(),
+                    source_profile: "Default".to_string(),
+                },
+            ],
+            started_at - Duration::minutes(1),
+            started_at + Duration::minutes(20),
+        );
+
+        assert_eq!(
+            (visits[0].ended_at - visits[0].started_at).num_seconds(),
+            300
+        );
+        assert_eq!(
+            (visits[1].ended_at - visits[1].started_at).num_seconds(),
+            600
+        );
     }
 
-    visits
-        .into_iter()
-        .filter(|visit| visit.ended_at > visit.started_at)
-        .collect()
+    #[test]
+    fn zero_duration_visit_extends_to_next_visit_start() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let visits = normalize_visit_ranges(
+            vec![
+                BrowserVisit {
+                    started_at,
+                    ended_at: started_at,
+                    url: "https://youtube.com/".to_string(),
+                    domain: "youtube.com".to_string(),
+                    source_profile: "Default".to_string(),
+                },
+                BrowserVisit {
+                    started_at: started_at + Duration::minutes(12),
+                    ended_at: started_at + Duration::minutes(13),
+                    url: "https://github.com/".to_string(),
+                    domain: "github.com".to_string(),
+                    source_profile: "Default".to_string(),
+                },
+            ],
+            started_at - Duration::minutes(1),
+            started_at + Duration::minutes(20),
+        );
+
+        assert_eq!(
+            (visits[0].ended_at - visits[0].started_at).num_seconds(),
+            12 * 60
+        );
+    }
 }

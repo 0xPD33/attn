@@ -3,8 +3,15 @@ use anyhow::Result;
 use std::sync::Mutex;
 
 pub enum NotificationKind {
-    BreakOverdue { active_secs: i64, overdue_secs: i64 },
-    BudgetExceeded { category: String, seconds: i64, budget_secs: i64 },
+    BreakOverdue {
+        active_secs: i64,
+        overdue_secs: i64,
+    },
+    BudgetExceeded {
+        category: String,
+        seconds: i64,
+        budget_secs: i64,
+    },
 }
 
 pub trait NotificationSink: Send + Sync {
@@ -24,7 +31,10 @@ impl DesktopNotifier {
 impl NotificationSink for DesktopNotifier {
     fn notify(&self, kind: NotificationKind) -> Result<()> {
         let (summary, body, urgency) = match &kind {
-            NotificationKind::BreakOverdue { active_secs, overdue_secs } => {
+            NotificationKind::BreakOverdue {
+                active_secs,
+                overdue_secs,
+            } => {
                 let active_min = active_secs / 60;
                 let active_sec = active_secs % 60;
                 let active_str = if active_min > 0 {
@@ -36,7 +46,11 @@ impl NotificationSink for DesktopNotifier {
                 let body = format!("focused for {}, over by {}s", active_str, overdue_secs);
                 (summary, body, notify_rust::Urgency::Normal)
             }
-            NotificationKind::BudgetExceeded { category, seconds, budget_secs } => {
+            NotificationKind::BudgetExceeded {
+                category,
+                seconds,
+                budget_secs,
+            } => {
                 let summary = format!(
                     "{} — {} budget reached ({}s / {}s)",
                     self.app_name, category, seconds, budget_secs
@@ -77,7 +91,9 @@ pub struct RecordingNotifier {
 #[cfg(test)]
 impl RecordingNotifier {
     pub fn new() -> Self {
-        Self { calls: Mutex::new(Vec::new()) }
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn call_count(&self) -> usize {

@@ -74,8 +74,12 @@ fn socket2_path() -> Result<std::path::PathBuf> {
 
 fn connect_socket2() -> Result<UnixStream> {
     let path = socket2_path()?;
-    UnixStream::connect(&path)
-        .with_context(|| format!("failed to connect to hyprland socket2 at {}", path.display()))
+    UnixStream::connect(&path).with_context(|| {
+        format!(
+            "failed to connect to hyprland socket2 at {}",
+            path.display()
+        )
+    })
 }
 
 /// Hyprland emits `event>>data` lines on socket2.
@@ -92,8 +96,7 @@ fn query_active_window() -> Result<Option<FocusedWindow>> {
     if !output.status.success() {
         return Ok(None);
     }
-    let value: Value =
-        serde_json::from_slice(&output.stdout).context("invalid hyprctl JSON")?;
+    let value: Value = serde_json::from_slice(&output.stdout).context("invalid hyprctl JSON")?;
 
     // hyprctl returns `{}` or a window object
     if !value.is_object() || value.as_object().map(|o| o.is_empty()).unwrap_or(true) {
@@ -106,12 +109,7 @@ fn query_active_window() -> Result<Option<FocusedWindow>> {
         .or_else(|| value.get("class"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            value
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-        })
+        .unwrap_or_else(|| value.get("title").and_then(|v| v.as_str()).unwrap_or(""))
         .to_string();
 
     if app_id.is_empty() {
@@ -130,13 +128,10 @@ fn query_active_window() -> Result<Option<FocusedWindow>> {
         .and_then(|n| i32::try_from(n).ok());
 
     // Hyprland window address is a hex string like "0x55f3a2b40c00"
-    let window_id = value
-        .get("address")
-        .and_then(|v| v.as_str())
-        .and_then(|s| {
-            let hex = s.trim_start_matches("0x");
-            i64::from_str_radix(hex, 16).ok()
-        });
+    let window_id = value.get("address").and_then(|v| v.as_str()).and_then(|s| {
+        let hex = s.trim_start_matches("0x");
+        i64::from_str_radix(hex, 16).ok()
+    });
 
     Ok(Some(FocusedWindow {
         window_id,

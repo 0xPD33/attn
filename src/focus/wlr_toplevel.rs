@@ -70,7 +70,11 @@ struct ToplevelState {
 
 impl ToplevelState {
     fn emit_current(&self) {
-        let event = match self.active_id.as_ref().and_then(|id| self.toplevels.get(id)) {
+        let event = match self
+            .active_id
+            .as_ref()
+            .and_then(|id| self.toplevels.get(id))
+        {
             Some(info) => {
                 let app_id = info
                     .app_id
@@ -172,12 +176,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ToplevelState {
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: raw } => {
-                let activated = raw
-                    .chunks_exact(4)
-                    .any(|b| {
-                        let v = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
-                        v == zwlr_foreign_toplevel_handle_v1::State::Activated as u32
-                    });
+                let activated = raw.chunks_exact(4).any(|b| {
+                    let v = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+                    v == zwlr_foreign_toplevel_handle_v1::State::Activated as u32
+                });
                 if let Some(info) = state.toplevels.get_mut(&id) {
                     info.activated = activated;
                 }
@@ -235,13 +237,15 @@ fn run_toplevel_loop(sink: &FocusSink) -> Result<()> {
         sink: sink.clone(),
     };
 
-    event_queue.roundtrip(&mut state).context("wayland roundtrip")?;
-    event_queue.roundtrip(&mut state).context("wayland roundtrip 2")?;
+    event_queue
+        .roundtrip(&mut state)
+        .context("wayland roundtrip")?;
+    event_queue
+        .roundtrip(&mut state)
+        .context("wayland roundtrip 2")?;
 
     if state.manager.is_none() {
-        anyhow::bail!(
-            "compositor does not support zwlr_foreign_toplevel_manager_v1"
-        );
+        anyhow::bail!("compositor does not support zwlr_foreign_toplevel_manager_v1");
     }
 
     loop {
