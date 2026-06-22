@@ -35,6 +35,12 @@ Item {
     property bool notificationsBudgetExceeded: true
     property string focusSourceKind: "auto"
 
+    property int switchCount: 0
+    property int longestFocusSecs: 0
+    property int deepWorkBlocks: 0
+    property string activeSince: ""
+    property string activeUntil: ""
+
     signal clicked()
 
     property int _initialPolls: 0
@@ -104,6 +110,11 @@ Item {
                     if (status.notifications_break_overdue !== undefined) root.notificationsBreakOverdue = !!status.notifications_break_overdue;
                     if (status.notifications_budget_exceeded !== undefined) root.notificationsBudgetExceeded = !!status.notifications_budget_exceeded;
                     if (status.focus_source_kind !== undefined) root.focusSourceKind = String(status.focus_source_kind);
+                    root.switchCount = Number(status.switch_count || 0);
+                    root.longestFocusSecs = Number(status.longest_focus_secs || 0);
+                    root.deepWorkBlocks = Number(status.deep_work_blocks || 0);
+                    root.activeSince = String(status.active_since || "");
+                    root.activeUntil = String(status.active_until || "");
                     root.stale = false;
                 } catch (e) {
                     root.stale = true;

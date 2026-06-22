@@ -204,6 +204,18 @@ fn run() -> Result<()> {
             }
             init_config(force, merge)
         }
+        Some("export") => {
+            let mut since: Option<String> = None;
+            let mut until: Option<String> = None;
+            for arg in args {
+                if let Some(v) = arg.strip_prefix("--since=") {
+                    since = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--until=") {
+                    until = Some(v.to_string());
+                }
+            }
+            run_export(since.as_deref(), until.as_deref())
+        }
         Some("doctor") => run_doctor(),
         Some("--help") | Some("-h") | None => {
             print_help();
@@ -215,8 +227,113 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn categorize --kind=app|domain --id=<id> --category=<name>\n  attn set-budget --category=<name> --secs=<N>\n  attn set-notifications [--enabled=BOOL] [--break-overdue=BOOL] [--budget-exceeded=BOOL]\n  attn set-focus-source --kind=auto|niri|hyprland|river|sway\n  attn init [--force|--merge]\n  attn doctor"
+        "attn\n\nUsage:\n  attn daemon\n  attn status --json\n  attn reload\n  attn break-start\n  attn break-end\n  attn set-breaks [--enabled=true|false] [--interval=SECS] [--min-break=SECS]\n  attn categorize --kind=app|domain --id=<id> --category=<name>\n  attn set-budget --category=<name> --secs=<N>\n  attn set-notifications [--enabled=BOOL] [--break-overdue=BOOL] [--budget-exceeded=BOOL]\n  attn set-focus-source --kind=auto|niri|hyprland|river|sway\n  attn export [--since=YYYY-MM-DD] [--until=YYYY-MM-DD]\n  attn init [--force|--merge]\n  attn doctor"
     );
+}
+
+// ponytail: minimal RFC-4180 quoting — window titles/URLs contain commas. Avoids the csv crate.
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_export_date(value: &str) -> Result<DateTime<Utc>> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .with_context(|| format!("invalid date {value:?}, expected YYYY-MM-DD"))?;
+    local_day_start_utc(date)
+}
+
+/// Dump the raw interval ledger to CSV on stdout, attributing each row to its watch
+/// category (the column raw SQLite can't produce on its own). App durations use the
+/// same idle cap as attn's daily totals; domain rows use their stored span.
+fn run_export(since: Option<&str>, until: Option<&str>) -> Result<()> {
+    let config = Config::load_default()?;
+    let db = open_state_db(&config.state_path)?;
+    let now = Utc::now();
+
+    let lo = since.map(parse_export_date).transpose()?;
+    let hi = until
+        .map(parse_export_date)
+        .transpose()?
+        .map(|d| d + Duration::days(1));
+    let in_range =
+        |start: DateTime<Utc>| lo.map_or(true, |l| start >= l) && hi.map_or(true, |h| start < h);
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "kind,started_at,ended_at,duration_secs,id,category,detail")?;
+
+    let mut stmt = db.prepare(
+        "SELECT started_at, ended_at, app_id, window_title
+         FROM app_intervals ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (started_at, ended_at, app_id, title) = row?;
+        let start = parse_rfc3339_utc(&started_at)?;
+        if !in_range(start) {
+            continue;
+        }
+        let ended = ended_at.as_deref().map(parse_rfc3339_utc).transpose()?;
+        let dur = (capped_interval_end(start, ended, now, config.idle_after_secs) - start)
+            .num_seconds()
+            .max(0);
+        let category = config.category_for_app(&app_id).unwrap_or_default();
+        writeln!(
+            out,
+            "app,{},{},{},{},{},{}",
+            csv_field(&started_at),
+            csv_field(ended_at.as_deref().unwrap_or("")),
+            dur,
+            csv_field(&app_id),
+            csv_field(&category),
+            csv_field(&title),
+        )?;
+    }
+
+    let mut stmt = db.prepare(
+        "SELECT started_at, ended_at, domain, url
+         FROM domain_intervals ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (started_at, ended_at, domain, url) = row?;
+        let start = parse_rfc3339_utc(&started_at)?;
+        if !in_range(start) {
+            continue;
+        }
+        let dur = (parse_rfc3339_utc(&ended_at)? - start).num_seconds().max(0);
+        let category = config.category_for_domain(&domain).unwrap_or_default();
+        writeln!(
+            out,
+            "domain,{},{},{},{},{},{}",
+            csv_field(&started_at),
+            csv_field(&ended_at),
+            dur,
+            csv_field(&domain),
+            csv_field(&category),
+            csv_field(&url),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn init_config(force: bool, merge: bool) -> Result<()> {
@@ -3401,6 +3518,13 @@ struct Status {
     notifications_break_overdue: bool,
     notifications_budget_exceeded: bool,
     focus_source_kind: String,
+    switch_count: i64,
+    longest_focus_secs: i64,
+    deep_work_blocks: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_until: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3504,6 +3628,171 @@ fn compute_active_session_seconds(
     Ok(session)
 }
 
+// ponytail: distraction categories hardcoded; move to a [focus] config table if you
+// ever want to tune them without a recompile. Must match category names in default.toml.
+const DISTRACTION_CATEGORIES: &[&str] = &["scroll", "video"];
+// ponytail: 25 min deep-work threshold; promote to config if it needs tuning.
+const DEEP_WORK_MIN_SECS: i64 = 1500;
+// ponytail: 60s sampling bucket — precision is immaterial against a 25 min threshold.
+const FOCUS_BUCKET_SECS: i64 = 60;
+
+struct FocusMetrics {
+    switch_count: i64,
+    longest_focus_secs: i64,
+    deep_work_blocks: i64,
+    active_since: Option<DateTime<Utc>>,
+    active_until: Option<DateTime<Utc>>,
+}
+
+fn is_distraction_category(cat: Option<&str>) -> bool {
+    cat.is_some_and(|c| DISTRACTION_CATEGORIES.contains(&c))
+}
+
+/// Attention metrics for the [start, end) day window, derived from the existing
+/// interval ledger. Switches and the work window come straight from app_intervals;
+/// deep-work blocks come from sampling the activity envelope in fixed buckets, where
+/// a bucket counts as "deep" when focus covers it and no distraction (scroll/video
+/// app, or scroll/video domain inside a browser) does. Non-deep stretches shorter
+/// than the break threshold are tolerated within a block, matching the active-session
+/// walk. Closed intervals use the idle cap (so stale focus can't bridge a break); the
+/// open/live interval stays uncapped, like compute_active_session_seconds.
+fn compute_focus_metrics(
+    db: &Connection,
+    config: &Config,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<FocusMetrics> {
+    let effective_now = now.min(end);
+    let browser_ids = config.browser_app_ids();
+
+    let mut focused: Vec<(i64, i64)> = Vec::new();
+    let mut distraction: Vec<(i64, i64)> = Vec::new();
+    let mut switch_count = 0i64;
+    let mut since: Option<DateTime<Utc>> = None;
+    let mut until: Option<DateTime<Utc>> = None;
+
+    let mut stmt = db.prepare(
+        "SELECT started_at, ended_at, app_id
+         FROM app_intervals
+         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3
+         ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            end.to_rfc3339(),
+            effective_now.to_rfc3339(),
+            start.to_rfc3339()
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (started_at, ended_at, app_id) = row?;
+        let raw_start = parse_rfc3339_utc(&started_at)?;
+        let ended = ended_at.map(|v| parse_rfc3339_utc(&v)).transpose()?;
+        let interval_end = match ended {
+            None => effective_now,
+            Some(_) => capped_interval_end(raw_start, ended, effective_now, config.idle_after_secs),
+        }
+        .min(end);
+        let interval_start = raw_start.max(start);
+        if interval_end <= interval_start {
+            continue;
+        }
+        if raw_start >= start {
+            switch_count += 1;
+        }
+        since = Some(since.map_or(interval_start, |s| s.min(interval_start)));
+        until = Some(until.map_or(interval_end, |u| u.max(interval_end)));
+        focused.push((interval_start.timestamp(), interval_end.timestamp()));
+        if !browser_ids.contains(&normalize_id(&app_id))
+            && is_distraction_category(config.category_for_app(&app_id).as_deref())
+        {
+            distraction.push((interval_start.timestamp(), interval_end.timestamp()));
+        }
+    }
+
+    let mut stmt = db.prepare(
+        "SELECT started_at, ended_at, domain
+         FROM domain_intervals
+         WHERE started_at < ?1 AND ended_at > ?2
+         ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map(params![end.to_rfc3339(), start.to_rfc3339()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (started_at, ended_at, domain) = row?;
+        if !is_distraction_category(config.category_for_domain(&domain).as_deref()) {
+            continue;
+        }
+        let s = parse_rfc3339_utc(&started_at)?.max(start);
+        let e = parse_rfc3339_utc(&ended_at)?.min(end);
+        if e > s {
+            distraction.push((s.timestamp(), e.timestamp()));
+        }
+    }
+
+    let (Some(since_dt), Some(until_dt)) = (since, until) else {
+        return Ok(FocusMetrics {
+            switch_count,
+            longest_focus_secs: 0,
+            deep_work_blocks: 0,
+            active_since: None,
+            active_until: None,
+        });
+    };
+
+    let covers = |spans: &[(i64, i64)], t: i64| spans.iter().any(|&(s, e)| s <= t && t < e);
+    let finalize = |cur: &mut i64, longest: &mut i64, blocks: &mut i64| {
+        if *cur > 0 {
+            *longest = (*longest).max(*cur);
+            if *cur >= DEEP_WORK_MIN_SECS {
+                *blocks += 1;
+            }
+            *cur = 0;
+        }
+    };
+    let min_break = config.breaks.min_break_secs.max(1);
+    let mut longest = 0i64;
+    let mut blocks = 0i64;
+    let mut cur = 0i64;
+    let mut nondeep = 0i64;
+    let mut t = since_dt.timestamp();
+    let end_ts = until_dt.timestamp();
+    while t < end_ts {
+        if covers(&focused, t) && !covers(&distraction, t) {
+            cur += FOCUS_BUCKET_SECS;
+            nondeep = 0;
+        } else {
+            nondeep += FOCUS_BUCKET_SECS;
+            if nondeep >= min_break {
+                finalize(&mut cur, &mut longest, &mut blocks);
+            }
+        }
+        t += FOCUS_BUCKET_SECS;
+    }
+    finalize(&mut cur, &mut longest, &mut blocks);
+
+    Ok(FocusMetrics {
+        switch_count,
+        longest_focus_secs: longest,
+        deep_work_blocks: blocks,
+        active_since: Some(since_dt),
+        active_until: Some(until_dt),
+    })
+}
+
 fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Status> {
     let now = Utc::now();
     if rebuild {
@@ -3512,6 +3801,9 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
     let day = Local::now().date_naive();
     let day_string = day.to_string();
     let browser_ids = config.browser_app_ids();
+
+    let day_start = local_day_start_utc(day)?;
+    let focus = compute_focus_metrics(db, config, day_start, day_start + Duration::days(1), now)?;
 
     let apps = load_app_status(db, &day_string)?;
     let domains = load_domain_status(db, &day_string, &config.display)?;
@@ -3627,6 +3919,11 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
         notifications_break_overdue: config.notifications.break_overdue,
         notifications_budget_exceeded: config.notifications.budget_exceeded,
         focus_source_kind: config.focus_source.kind.clone(),
+        switch_count: focus.switch_count,
+        longest_focus_secs: focus.longest_focus_secs,
+        deep_work_blocks: focus.deep_work_blocks,
+        active_since: focus.active_since.map(|d| d.to_rfc3339()),
+        active_until: focus.active_until.map(|d| d.to_rfc3339()),
     })
 }
 
@@ -5399,6 +5696,68 @@ mod tests {
     }
 
     #[test]
+    fn focus_metrics_blocks_switches_and_distractions() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let config = Config::default();
+
+        let start = parse_rfc3339_utc("2026-06-22T00:00:00Z").unwrap();
+        let end = start + Duration::days(1);
+        let now = start + Duration::hours(23);
+
+        let ins_app = |s: i64, e: i64, app: &str| {
+            db.execute(
+                "INSERT INTO app_intervals(started_at, ended_at, app_id) VALUES (?1, ?2, ?3)",
+                params![
+                    (start + Duration::seconds(s)).to_rfc3339(),
+                    (start + Duration::seconds(e)).to_rfc3339(),
+                    app
+                ],
+            )
+            .unwrap();
+        };
+        let ins_dom = |s: i64, e: i64, dom: &str| {
+            db.execute(
+                "INSERT INTO domain_intervals(started_at, ended_at, browser_app_id, domain)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    (start + Duration::seconds(s)).to_rfc3339(),
+                    (start + Duration::seconds(e)).to_rfc3339(),
+                    "firefox",
+                    dom
+                ],
+            )
+            .unwrap();
+        };
+
+        // Intervals must stay <= idle_after_secs (300) or the idle cap chops them, so
+        // tile contiguous 300s slices to build a long unbroken block.
+        // Block: 30 min editor + 30 min browser-on-github, contiguous => one 60 min block.
+        for i in 0..6 {
+            ins_app(i * 300, (i + 1) * 300, "positron");
+        }
+        for i in 6..12 {
+            ins_app(i * 300, (i + 1) * 300, "firefox");
+        }
+        ins_dom(1800, 3600, "github.com"); // coding domain: not a distraction
+
+        // 60 min real break (gap >= min_break) splits the timeline here.
+
+        // 40 min browser session with a 10 min YouTube stretch in the middle: the
+        // distraction (>= min_break) prevents this from forming a deep block.
+        for i in 0..8 {
+            ins_app(7200 + i * 300, 7200 + (i + 1) * 300, "firefox");
+        }
+        ins_dom(8400, 9000, "youtube.com"); // video domain: a distraction
+
+        let m = compute_focus_metrics(&db, &config, start, end, now).unwrap();
+        assert_eq!(m.switch_count, 20, "every interval starting today is a switch");
+        assert_eq!(m.longest_focus_secs, 3600, "editor->browser stays one 60m block");
+        assert_eq!(m.deep_work_blocks, 1, "youtube splits the 40m session below 25m");
+        assert!(m.active_since.is_some() && m.active_until.is_some());
+    }
+
+    #[test]
     fn partial_config_keeps_default_watch_lists_and_browsers() {
         let path = unique_temp_db_path("attn-config");
         fs::write(
@@ -7128,6 +7487,11 @@ mod tests {
             notifications_break_overdue: true,
             notifications_budget_exceeded: true,
             focus_source_kind: "niri".to_string(),
+            switch_count: 0,
+            longest_focus_secs: 0,
+            deep_work_blocks: 0,
+            active_since: None,
+            active_until: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(
@@ -7173,6 +7537,11 @@ mod tests {
             notifications_break_overdue: true,
             notifications_budget_exceeded: true,
             focus_source_kind: "niri".to_string(),
+            switch_count: 0,
+            longest_focus_secs: 0,
+            deep_work_blocks: 0,
+            active_since: None,
+            active_until: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("uncategorized_apps"));
@@ -7371,6 +7740,11 @@ mod tests {
             notifications_break_overdue: true,
             notifications_budget_exceeded: false,
             focus_source_kind: "hyprland".to_string(),
+            switch_count: 0,
+            longest_focus_secs: 0,
+            deep_work_blocks: 0,
+            active_since: None,
+            active_until: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"notifications_enabled\":false"));

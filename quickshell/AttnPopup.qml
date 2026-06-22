@@ -52,6 +52,12 @@ PopupWindow {
     property string focusSourceKind: "auto"
     property string settingsRestartHint: ""
 
+    property int switchCount: 0
+    property int longestFocusSecs: 0
+    property int deepWorkBlocks: 0
+    property string activeSince: ""
+    property string activeUntil: ""
+
     signal breakStartRequested()
     signal breakEndRequested()
     signal statusRefreshRequested()
@@ -897,6 +903,22 @@ PopupWindow {
                                 }
                             }
                         }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "⚡ " + popup.switchCount + " switches · longest " + popup.formatDuration(popup.longestFocusSecs) + " · " + popup.deepWorkBlocks + " deep block" + (popup.deepWorkBlocks === 1 ? "" : "s")
+                        color: popup.textDim
+                        font.family: popup.fontFamily
+                        font.pixelSize: 10
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        visible: popup.activeSince !== ""
+                        text: "🕐 active " + popup.formatUpdatedAt(popup.activeSince) + "–" + popup.formatUpdatedAt(popup.activeUntil)
+                        color: popup.textDim
+                        font.family: popup.fontFamily
+                        font.pixelSize: 10
                     }
                 }
             }
