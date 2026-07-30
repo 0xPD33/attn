@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-30
+
+### Fixed
+- **Bundled watch lists had two sources of truth**: `default_app_watch`, `default_domain_watch`, and `default_browsers` hardcoded ~450 lines of app IDs, domains, and browser definitions in `src/main.rs` that duplicated `config/default.toml` and had drifted badly from it — the Rust copy carried 8 domain categories against the TOML's 23 (no `news`, `devops`, `finance`, `travel`, …) and was missing Brave's Flatpak history path. A `config.toml` that omitted `[apps.watch]`, `[domains.watch]`, or `[browsers]` inherited that stale copy via serde field defaults, and because `apply_user_config` overwrites browser entries wholesale, such a config silently stopped reading Brave-on-Flatpak history. All three now read the compiled-in `config/default.toml`, so `config/apps/*.txt` + `config/domains/*.txt` → `tools/sync-default-config.sh` → `config/default.toml` is the single source of truth end to end, with the first hop already verified by CI.
+
+### Changed
+- **ARCHITECTURE.md brought back in line with the code**: it still described a niri-only, notification-free daemon. Corrected the "no notifications" design claim (the daemon does emit opt-in break and budget notifications; it still never blocks or intervenes), fixed the SQLite schema section (added `media_intervals`, the indexes, the real column order, and a table of every `meta` key including the `notified_budget:<day>:<category>` dedup key), and added the sections that were missing entirely: MPRIS media tracking, focus metrics, notifications, per-category daily budgets, the pause/break state machine, CSV export, and config layering. Also documented the four config-writing socket commands and their atomic-write protocol. README's "What it doesn't do" no longer claims "No alerts", and a new "How it works" section points at ARCHITECTURE.md up front; the CLI reference now lists all thirteen subcommands.
+- **Focus-source auto-detection is testable without mutating the environment**: `focus::auto_detect` now delegates to a pure `focus::detect_from(niri, hyprland, sway)`. The priority ladder is unchanged. The two tests that set and removed `NIRI_SOCKET` / `HYPRLAND_INSTANCE_SIGNATURE` raced each other under the parallel test runner and could fail `cargo test --release --locked` in CI; they are replaced by four env-free cases covering the whole ladder.
+
+### Removed
+- `docs/2026-05-15-v0.2-feature-batch.md` — the v0.2 implementation plan, still marked `Status: Planned` for work that shipped in 0.2.0 and 0.2.1. ARCHITECTURE.md now describes the shipped result. The plan templates it was generated from stay in `docs/templates/`.
+
 ## [0.2.1] - 2026-05-15
 
 ### Added
@@ -91,7 +103,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/0xPD33/attn/releases/tag/v0.2.2
 [0.2.1]: https://github.com/0xPD33/attn/releases/tag/v0.2.1
 [0.2.0]: https://github.com/0xPD33/attn/releases/tag/v0.2.0
 [0.1.3]: https://github.com/0xPD33/attn/releases/tag/v0.1.3
