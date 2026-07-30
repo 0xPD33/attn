@@ -2,7 +2,7 @@
 
 A local attention ledger for Wayland (Niri, Hyprland, Sway, river) and [Quickshell](https://quickshell.org/).
 
-`attn` measures where focus actually goes across applications, and which domains receive browser time (Chromium-family and Firefox-family). It's intentionally observational: no blocking, no streaks. It records local evidence, surfaces a discreet indicator in your bar, and optionally pings a desktop notification when a break is overdue or a daily budget is reached.
+`attn` measures where focus actually goes across applications, which domains receive browser time (Chromium-family and Firefox-family), and which video is genuinely playing. It's intentionally observational: no blocking, no streaks. It records local evidence, surfaces a discreet indicator in your bar, and optionally pings a desktop notification when a break is overdue or a daily budget is reached.
 
 > **Status:** V1, single-user, NixOS-tested with Niri + Quickshell, also runs on Hyprland, Sway, and river via the `focus_source.kind` config. The Rust daemon and CLI build on any Linux with `/proc`; the Quickshell widget is the optional UI layer.
 
@@ -16,13 +16,19 @@ A local attention ledger for Wayland (Niri, Hyprland, Sway, river) and [Quickshe
 ## What it tracks
 
 - **App focus time** from your compositor's IPC (Niri, Hyprland, Sway, river — auto-detected, overridable via `focus_source.kind`).
-- **Terminal subprocess**. If you're in `ghostty` and run `claude`, the daemon attributes time to `claude`, not `ghostty`. Detection uses (1) window title, (2) live tmux query if tmux is in the descendant tree, (3) a `/proc` descendant walk with start-time tiebreak.
+- **Terminal subprocess**. If you're in `ghostty` and run `claude`, the daemon attributes time to `claude`, not `ghostty`. Detection uses (1) window title, (2) a per-window cache of the last resolved program, (3) a live tmux query if tmux is in the descendant tree, (4) a `/proc` descendant walk with start-time tiebreak.
 - **Browser domain time** for Chromium-family (Helium, Brave, Chrome, Chromium) and Firefox-family (Firefox, Zen, LibreWolf, Floorp) browsers, clipped to intervals where that browser actually had focus. Domain time can never grow while the browser is unfocused.
+- **Video playback** via MPRIS, so a 2-hour film counts as 2 hours instead of one navigation event. Only counted while the playing browser has focus and the tab is on a known video domain.
+- **Focus metrics** derived from the same ledger: context switches, longest uninterrupted stretch, 25-minute deep-work blocks, and the day's work window.
 - **Idle handling**. A focused interval that doesn't change for 5 minutes is capped, so an unattended tab doesn't inflate today's total.
 
 ## What it doesn't do
 
-No blocking. No alerts. No interventions. No cloud sync. No telemetry. No per-tab live tracking. No AI summaries. No streaks or scores. If you want behavior change, this is the wrong tool. It's a notebook, not a coach.
+No blocking. No gating. No interventions. No cloud sync. No telemetry. No per-tab live tracking. No AI summaries. No streaks or scores. The only thing it will ever do unprompted is a desktop notification when a break is overdue or a daily category budget is spent — both opt-in, both off with one line of config. If you want behavior change, this is the wrong tool. It's a notebook, not a coach.
+
+## How it works
+
+Read **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the whole picture: the data model and SQLite schema, how focus attribution and terminal-subprocess resolution work, how browser and MPRIS time is clipped to actual focus, the socket API and status JSON, and the failure modes. Start there if you're changing the code or wondering why a number looks the way it does.
 
 ## Privacy
 
@@ -107,13 +113,13 @@ $EDITOR ~/.config/attn/config.toml
 The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** The watch lists live in per-category text files (one item per line, `#` comments allowed):
 
 - `config/apps/<category>.txt` - Linux app IDs / executable names
-- `config/domains/<category>.txt` - domains for Chromium-family history matching
+- `config/domains/<category>.txt` - domains for browser history matching
 
 Edit the relevant file, run `tools/sync-default-config.sh` to regenerate `config/default.toml`, and open a PR. CI verifies the regenerated TOML matches the per-category sources.
 
-Non-list runtime config (paths, intervals, browsers, terminals, breaks) lives in `config/runtime.toml`.
+Non-list runtime config (paths, intervals, browsers, terminals, breaks, notifications) lives in `config/runtime.toml`. `config/default.toml` is the generated union of both and is the single source of truth for the bundled defaults - the daemon embeds it at compile time and the Nix flake reads the same file, so don't hand-edit it.
 
-Customize watch lists per category in your own `~/.config/attn/config.toml`:
+Your own `~/.config/attn/config.toml` only needs to state its differences: watch lists merge per category on top of the bundled defaults, everything else replaces. For example:
 
 ```toml
 poll_interval_secs = 60
@@ -142,9 +148,24 @@ poll_secs = 10
 [terminals.apps]
 ai     = ["claude", "codex", "aichat"]
 editor = ["nvim", "vim", "hx", "helix", "emacs"]
+
+[breaks]
+enabled        = true
+interval_secs  = 3600   # prompt after an hour of continuous focus
+min_break_secs = 300    # 5 min of input idle counts as a break
+
+[notifications]
+enabled         = true  # false disables both notifications below
+break_overdue   = true
+budget_exceeded = true
+
+[budgets.scroll]
+daily_budget_secs = 1800   # amber past 30 min/day; 0 or absent means no budget
 ```
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data model.
+Break, budget, notification and focus-source settings are also editable from the popup's settings sheet, or from the CLI (`attn set-breaks`, `attn set-budget`, `attn set-notifications`, `attn set-focus-source`) - the CLI variants rewrite `config.toml` in place, preserving your comments.
+
+For how the numbers are actually derived, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Run
 
@@ -168,14 +189,24 @@ attn daemon
 
 ```
 attn daemon              run the long-running collector
-attn status --json       print current-day status as JSON (used by Quickshell)
+attn status --json       print current-day + 7-day status as JSON (used by Quickshell)
 attn reload              reload ~/.config/attn/config.toml without restarting
 attn init [--merge|--force]
                          write or update the default config
-attn doctor              check compositor IPC, config parsing, state DB, browser DBs, socket
+attn doctor              check config, state DB, focus source, wayland idle, dbus, browser DBs, socket
+attn break-start         pause tracking
+attn break-end           resume tracking
+attn set-breaks     [--enabled=BOOL] [--interval=SECS] [--min-break=SECS]
+attn set-budget     --category=NAME --secs=N          # 0 clears the budget
+attn set-notifications [--enabled=BOOL] [--break-overdue=BOOL] [--budget-exceeded=BOOL]
+attn set-focus-source --kind=auto|niri|hyprland|river|sway
+attn categorize     --kind=app|domain --id=ID --category=NAME
+attn export         [--since=YYYY-MM-DD] [--until=YYYY-MM-DD]
 ```
 
-Example `status` output:
+`attn export` dumps the raw ledger as CSV on stdout - one row per app interval and domain interval, with `kind,started_at,ended_at,duration_secs,id,category,detail`. It reads the state DB directly, so it works with the daemon stopped.
+
+Abridged `status` output:
 
 ```json
 {
@@ -183,6 +214,8 @@ Example `status` output:
   "updated_at": "2026-05-12T22:30:00+02:00",
   "watch_seconds": 15563,
   "tracked_seconds": 16928,
+  "media_seconds": 252,
+  "video_watch_seconds": 252,
   "apps": [
     { "id": "claude",                 "seconds": 1094, "watched": true, "category": "ai" },
     { "id": "com.mitchellh.ghostty",  "seconds": 5285, "watched": true, "category": "terminal" }
@@ -193,17 +226,25 @@ Example `status` output:
   ],
   "categories": [
     { "name": "ai",       "seconds": 6979 },
-    { "name": "terminal", "seconds": 5285 }
-  ]
+    { "name": "terminal", "seconds": 5285 },
+    { "name": "scroll",   "seconds": 2100, "budget_secs": 1800, "over_budget": true }
+  ],
+  "switch_count": 84,
+  "longest_focus_secs": 4320,
+  "deep_work_blocks": 3,
+  "break_overdue": false,
+  "paused": false
 }
 ```
+
+The real response also carries `days[]` (today plus the previous 6), the `media` list, `uncategorized_apps` / `uncategorized_domains`, the break and notification settings, and the day's work window. See ARCHITECTURE.md for the full shape.
 
 ## Quickshell widget
 
 Three QML files under `quickshell/`:
 
-- `AttnIndicator.qml`: bar chip. Polls `attn status --json` (fast initial polls, then every 5 s). Dims when stale, brightens when fresh.
-- `AttnPopup.qml`: clicking the chip opens a popup with today's totals: a stacked category bar, top items, category filter chips, and side-by-side Apps / Domains lists.
+- `AttnIndicator.qml`: bar chip. Polls `attn status --json` (fast initial polls, then every 5 s). Dims when stale, brightens when fresh; pulses amber when a break is overdue or tracking is paused.
+- `AttnPopup.qml`: clicking the chip opens a popup. **Today** shows a stacked category bar with budget stripes, the focus-metrics line, top items, category filter chips, side-by-side Apps / Domains lists, and an **Other** drawer where uncategorized items can be filed into a category in one click. **Week** shows the last 7 days as stacked bars. The gear icon opens a settings sheet for break reminders, per-category budgets, notification toggles, and the focus source.
 - `AttnRow.qml`: list row used by the popup.
 
 If you used `programs.attn.quickshell.enable = true`, only the indicator is installed. Wire the popup into your own bar manually. The reference wiring lives in the home-manager Quickshell config that owns `Bar.qml` for this project.
@@ -216,7 +257,7 @@ cargo test
 cargo build --release
 ```
 
-The test suite covers focus resolution, terminal subprocess detection, browser snapshot reading, domain attribution, idle capping, watch-list classification, and daily-totals rebuild. Tests use in-memory SQLite.
+The test suite covers focus resolution and compositor auto-detection, terminal subprocess detection, Chromium and Firefox snapshot reading, domain attribution and the video-title override, MPRIS media gating, idle capping, pause transitions, config merging and watch-list classification, daily-totals rebuild, focus metrics, budget thresholds, notification dedup, and the `toml_edit` config-writing commands. Tests use in-memory or temp-file SQLite.
 
 ## License
 
