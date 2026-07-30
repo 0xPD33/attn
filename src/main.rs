@@ -19,7 +19,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -631,7 +631,7 @@ struct DomainsConfig {
     watch: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct BrowserConfig {
     #[serde(default)]
     app_ids: Vec<String>,
@@ -656,155 +656,7 @@ fn default_apps_config() -> AppsConfig {
 }
 
 fn default_app_watch() -> BTreeMap<String, Vec<String>> {
-    let mut watch = BTreeMap::new();
-    watch.insert(
-        "coding".to_string(),
-        vec![
-            "code".to_string(),
-            "code-insiders".to_string(),
-            "vscodium".to_string(),
-            "codium".to_string(),
-            "cursor".to_string(),
-            "windsurf".to_string(),
-            "zed".to_string(),
-            "dev.zed.Zed".to_string(),
-            "antigravity".to_string(),
-            "sublime_text".to_string(),
-            "lapce".to_string(),
-            "android-studio".to_string(),
-            "jetbrains-toolbox".to_string(),
-            "jetbrains-idea".to_string(),
-            "intellij-idea-ultimate".to_string(),
-            "intellij-idea-community".to_string(),
-            "webstorm".to_string(),
-            "pycharm".to_string(),
-            "pycharm-community".to_string(),
-            "goland".to_string(),
-            "rustrover".to_string(),
-            "phpstorm".to_string(),
-            "rubymine".to_string(),
-            "clion".to_string(),
-            "datagrip".to_string(),
-            "rider".to_string(),
-            "fleet".to_string(),
-        ],
-    );
-    watch.insert(
-        "terminal".to_string(),
-        vec![
-            "com.mitchellh.ghostty".to_string(),
-            "ghostty".to_string(),
-            "wezterm".to_string(),
-            "kitty".to_string(),
-            "alacritty".to_string(),
-            "foot".to_string(),
-            "org.wezfurlong.wezterm".to_string(),
-            "gnome-terminal".to_string(),
-            "konsole".to_string(),
-            "xterm".to_string(),
-            "urxvt".to_string(),
-            "terminator".to_string(),
-            "tilix".to_string(),
-            "warp".to_string(),
-            "dev.warp.Warp".to_string(),
-        ],
-    );
-    watch.insert(
-        "chat".to_string(),
-        vec![
-            "discord".to_string(),
-            "vesktop".to_string(),
-            "signal".to_string(),
-            "signal-desktop".to_string(),
-            "slack".to_string(),
-            "telegram-desktop".to_string(),
-            "org.telegram.desktop".to_string(),
-            "element".to_string(),
-            "element-desktop".to_string(),
-            "im.riot.Riot".to_string(),
-            "thunderbird".to_string(),
-            "betterbird".to_string(),
-            "geary".to_string(),
-            "evolution".to_string(),
-            "mailspring".to_string(),
-            "teams-for-linux".to_string(),
-            "zoom".to_string(),
-            "us.zoom.Zoom".to_string(),
-        ],
-    );
-    watch.insert(
-        "design".to_string(),
-        vec![
-            "figma-linux".to_string(),
-            "inkscape".to_string(),
-            "org.inkscape.Inkscape".to_string(),
-            "gimp".to_string(),
-            "org.gimp.GIMP".to_string(),
-            "krita".to_string(),
-            "org.kde.krita".to_string(),
-            "blender".to_string(),
-            "org.blender.Blender".to_string(),
-            "godot".to_string(),
-            "org.godotengine.Godot".to_string(),
-        ],
-    );
-    watch.insert(
-        "productivity".to_string(),
-        vec![
-            "obsidian".to_string(),
-            "md.obsidian.Obsidian".to_string(),
-            "logseq".to_string(),
-            "com.logseq.Logseq".to_string(),
-            "joplin".to_string(),
-            "joplin-desktop".to_string(),
-            "notion-app".to_string(),
-            "notion-snap".to_string(),
-            "anytype".to_string(),
-            "zettlr".to_string(),
-        ],
-    );
-    watch.insert(
-        "video".to_string(),
-        vec![
-            "mpv".to_string(),
-            "io.mpv.Mpv".to_string(),
-            "vlc".to_string(),
-            "org.videolan.VLC".to_string(),
-            "celluloid".to_string(),
-            "io.github.celluloid_player.Celluloid".to_string(),
-            "smplayer".to_string(),
-            "haruna".to_string(),
-        ],
-    );
-    watch.insert(
-        "games".to_string(),
-        vec![
-            "steam".to_string(),
-            "com.valvesoftware.Steam".to_string(),
-            "lutris".to_string(),
-            "net.lutris.Lutris".to_string(),
-            "heroic".to_string(),
-            "com.heroicgameslauncher.hgl".to_string(),
-            "bottles".to_string(),
-            "com.usebottles.bottles".to_string(),
-            "itch".to_string(),
-            "io.itch.itch".to_string(),
-        ],
-    );
-    watch.insert(
-        "music".to_string(),
-        vec![
-            "spotify".to_string(),
-            "com.spotify.Client".to_string(),
-            "rhythmbox".to_string(),
-            "org.gnome.Rhythmbox3".to_string(),
-            "elisa".to_string(),
-            "amberol".to_string(),
-            "io.bassi.Amberol".to_string(),
-            "audacious".to_string(),
-        ],
-    );
-    watch
+    bundled_default_table(&["apps", "watch"])
 }
 
 impl Default for AppsConfig {
@@ -820,188 +672,7 @@ fn default_domains_config() -> DomainsConfig {
 }
 
 fn default_domain_watch() -> BTreeMap<String, Vec<String>> {
-    let mut watch = BTreeMap::new();
-    watch.insert(
-        "coding".to_string(),
-        vec![
-            "github.com".to_string(),
-            "gist.github.com".to_string(),
-            "gitlab.com".to_string(),
-            "bitbucket.org".to_string(),
-            "codeberg.org".to_string(),
-            "stackoverflow.com".to_string(),
-            "stackexchange.com".to_string(),
-            "serverfault.com".to_string(),
-            "superuser.com".to_string(),
-            "askubuntu.com".to_string(),
-            "vercel.com".to_string(),
-            "netlify.com".to_string(),
-            "cloudflare.com".to_string(),
-            "developers.cloudflare.com".to_string(),
-            "railway.app".to_string(),
-            "railway.com".to_string(),
-            "fly.io".to_string(),
-            "render.com".to_string(),
-            "supabase.com".to_string(),
-            "planetscale.com".to_string(),
-            "neon.tech".to_string(),
-            "console.aws.amazon.com".to_string(),
-            "cloud.google.com".to_string(),
-            "portal.azure.com".to_string(),
-            "npmjs.com".to_string(),
-            "pypi.org".to_string(),
-            "crates.io".to_string(),
-            "rubygems.org".to_string(),
-            "packagist.org".to_string(),
-            "jsr.io".to_string(),
-            "developer.mozilla.org".to_string(),
-            "web.dev".to_string(),
-            "caniuse.com".to_string(),
-            "regex101.com".to_string(),
-            "godbolt.org".to_string(),
-            "docs.python.org".to_string(),
-            "docs.rs".to_string(),
-            "doc.rust-lang.org".to_string(),
-            "nodejs.org".to_string(),
-            "react.dev".to_string(),
-            "nextjs.org".to_string(),
-            "vuejs.org".to_string(),
-            "svelte.dev".to_string(),
-            "tailwindcss.com".to_string(),
-            "typescriptlang.org".to_string(),
-            "learn.microsoft.com".to_string(),
-            "developers.google.com".to_string(),
-            "developer.apple.com".to_string(),
-            "kubernetes.io".to_string(),
-            "helm.sh".to_string(),
-            "nixos.org".to_string(),
-            "wiki.nixos.org".to_string(),
-            "search.nixos.org".to_string(),
-            "huggingface.co".to_string(),
-        ],
-    );
-    watch.insert(
-        "ai".to_string(),
-        vec![
-            "chatgpt.com".to_string(),
-            "claude.ai".to_string(),
-            "gemini.google.com".to_string(),
-            "anthropic.com".to_string(),
-            "openai.com".to_string(),
-            "platform.openai.com".to_string(),
-            "poe.com".to_string(),
-            "perplexity.ai".to_string(),
-            "you.com".to_string(),
-            "mistral.ai".to_string(),
-            "deepseek.com".to_string(),
-            "chat.deepseek.com".to_string(),
-            "kimi.moonshot.cn".to_string(),
-            "grok.com".to_string(),
-            "x.ai".to_string(),
-            "copilot.microsoft.com".to_string(),
-            "console.anthropic.com".to_string(),
-            "aistudio.google.com".to_string(),
-        ],
-    );
-    watch.insert(
-        "design".to_string(),
-        vec![
-            "figma.com".to_string(),
-            "sketch.com".to_string(),
-            "framer.com".to_string(),
-            "behance.net".to_string(),
-            "dribbble.com".to_string(),
-            "midjourney.com".to_string(),
-            "unsplash.com".to_string(),
-            "pexels.com".to_string(),
-            "excalidraw.com".to_string(),
-            "tldraw.com".to_string(),
-            "app.diagrams.net".to_string(),
-        ],
-    );
-    watch.insert(
-        "productivity".to_string(),
-        vec![
-            "notion.so".to_string(),
-            "linear.app".to_string(),
-            "atlassian.net".to_string(),
-            "jira.atlassian.com".to_string(),
-            "confluence.atlassian.com".to_string(),
-            "monday.com".to_string(),
-            "airtable.com".to_string(),
-            "trello.com".to_string(),
-            "asana.com".to_string(),
-            "clickup.com".to_string(),
-            "shortcut.com".to_string(),
-            "height.app".to_string(),
-            "todoist.com".to_string(),
-        ],
-    );
-    watch.insert(
-        "chat".to_string(),
-        vec![
-            "discord.com".to_string(),
-            "slack.com".to_string(),
-            "teams.microsoft.com".to_string(),
-            "web.whatsapp.com".to_string(),
-            "web.telegram.org".to_string(),
-            "messenger.com".to_string(),
-            "signal.org".to_string(),
-            "element.io".to_string(),
-            "app.element.io".to_string(),
-        ],
-    );
-    watch.insert(
-        "meeting".to_string(),
-        vec![
-            "meet.google.com".to_string(),
-            "zoom.us".to_string(),
-            "app.zoom.us".to_string(),
-            "whereby.com".to_string(),
-            "around.co".to_string(),
-        ],
-    );
-    watch.insert(
-        "video".to_string(),
-        vec![
-            "youtube.com".to_string(),
-            "youtu.be".to_string(),
-            "m.youtube.com".to_string(),
-            "vimeo.com".to_string(),
-            "netflix.com".to_string(),
-            "twitch.tv".to_string(),
-            "primevideo.com".to_string(),
-            "hulu.com".to_string(),
-            "disneyplus.com".to_string(),
-            "hbomax.com".to_string(),
-            "max.com".to_string(),
-            "peacocktv.com".to_string(),
-            "paramount.plus".to_string(),
-            "kick.com".to_string(),
-            "dailymotion.com".to_string(),
-        ],
-    );
-    watch.insert(
-        "scroll".to_string(),
-        vec![
-            "reddit.com".to_string(),
-            "old.reddit.com".to_string(),
-            "x.com".to_string(),
-            "twitter.com".to_string(),
-            "tiktok.com".to_string(),
-            "instagram.com".to_string(),
-            "facebook.com".to_string(),
-            "threads.net".to_string(),
-            "threads.com".to_string(),
-            "bsky.app".to_string(),
-            "tumblr.com".to_string(),
-            "9gag.com".to_string(),
-            "news.ycombinator.com".to_string(),
-            "lemmy.world".to_string(),
-            "kbin.social".to_string(),
-        ],
-    );
-    watch
+    bundled_default_table(&["domains", "watch"])
 }
 
 impl Default for DomainsConfig {
@@ -1011,112 +682,7 @@ impl Default for DomainsConfig {
 }
 
 fn default_browsers() -> BTreeMap<String, BrowserConfig> {
-    let mut browsers = BTreeMap::new();
-    browsers.insert(
-        "helium".to_string(),
-        BrowserConfig {
-            app_ids: vec!["helium".to_string(), "net.imput.helium".to_string()],
-            history_paths: vec![
-                "~/.config/net.imput.helium/*/History".to_string(),
-                "~/.var/app/net.imput.helium/config/net.imput.helium/*/History".to_string(),
-            ],
-            kind: "chromium".to_string(),
-        },
-    );
-    browsers.insert(
-        "brave".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "brave-browser".to_string(),
-                "brave".to_string(),
-                "com.brave.Browser".to_string(),
-            ],
-            history_paths: vec![
-                "~/.config/BraveSoftware/Brave-Browser/*/History".to_string(),
-                "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/*/History"
-                    .to_string(),
-                "~/snap/brave/current/.config/BraveSoftware/Brave-Browser/*/History".to_string(),
-            ],
-            kind: "chromium".to_string(),
-        },
-    );
-    browsers.insert(
-        "chrome".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "google-chrome".to_string(),
-                "chrome".to_string(),
-                "com.google.Chrome".to_string(),
-            ],
-            history_paths: vec![
-                "~/.config/google-chrome/*/History".to_string(),
-                "~/.var/app/com.google.Chrome/config/google-chrome/*/History".to_string(),
-            ],
-            kind: "chromium".to_string(),
-        },
-    );
-    browsers.insert(
-        "chromium".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "chromium".to_string(),
-                "chromium-browser".to_string(),
-                "org.chromium.Chromium".to_string(),
-                "Chromium-browser".to_string(),
-            ],
-            history_paths: vec![
-                "~/.config/chromium/*/History".to_string(),
-                "~/.var/app/org.chromium.Chromium/config/chromium/*/History".to_string(),
-                "~/snap/chromium/common/chromium/*/History".to_string(),
-            ],
-            kind: "chromium".to_string(),
-        },
-    );
-    browsers.insert(
-        "firefox".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "firefox".to_string(),
-                "Firefox".to_string(),
-                "org.mozilla.firefox".to_string(),
-            ],
-            history_paths: vec!["~/.mozilla/firefox/*/places.sqlite".to_string()],
-            kind: "firefox".to_string(),
-        },
-    );
-    browsers.insert(
-        "zen".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "zen".to_string(),
-                "zen-alpha".to_string(),
-                "app.zen_browser.zen".to_string(),
-                "io.github.zen_browser.zen".to_string(),
-            ],
-            history_paths: vec!["~/.zen/*/places.sqlite".to_string()],
-            kind: "firefox".to_string(),
-        },
-    );
-    browsers.insert(
-        "librewolf".to_string(),
-        BrowserConfig {
-            app_ids: vec![
-                "librewolf".to_string(),
-                "io.gitlab.librewolf-community".to_string(),
-            ],
-            history_paths: vec!["~/.librewolf/*/places.sqlite".to_string()],
-            kind: "firefox".to_string(),
-        },
-    );
-    browsers.insert(
-        "floorp".to_string(),
-        BrowserConfig {
-            app_ids: vec!["floorp".to_string(), "one.ablaze.floorp".to_string()],
-            history_paths: vec!["~/.floorp/*/places.sqlite".to_string()],
-            kind: "firefox".to_string(),
-        },
-    );
-    browsers
+    bundled_default_table(&["browsers"])
 }
 
 fn default_state_path() -> PathBuf {
@@ -1241,6 +807,44 @@ impl Config {
 
 fn bundled_default_config() -> Result<Config> {
     toml::from_str::<Config>(DEFAULT_CONFIG_TOML).context("failed to parse bundled default config")
+}
+
+/// The bundled `config/default.toml` as a raw TOML tree.
+///
+/// Parsed as `toml::Value` rather than `Config` on purpose: `Config`'s serde
+/// field defaults read back out of this tree, and going through `Config` here
+/// would make that recursive.
+fn bundled_default_value() -> &'static toml::Value {
+    static VALUE: OnceLock<toml::Value> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        toml::from_str(DEFAULT_CONFIG_TOML).expect("bundled default config must be valid TOML")
+    })
+}
+
+/// Pull one table out of the bundled default config, e.g. `["apps", "watch"]`.
+///
+/// This is the single source of truth for the shipped watch lists and browser
+/// definitions: `config/default.toml` is generated from `config/apps/*.txt` and
+/// `config/domains/*.txt` by `tools/sync-default-config.sh`, and CI verifies the
+/// regenerated TOML matches those sources. Serde field defaults route here so a
+/// partial user `config.toml` inherits the same lists a full one would, instead
+/// of a hand-maintained Rust copy that silently drifts.
+fn bundled_default_table<T>(path: &[&str]) -> T
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    let mut node = bundled_default_value();
+    for key in path {
+        match node.get(key) {
+            Some(next) => node = next,
+            None => return T::default(),
+        }
+    }
+    // A present-but-malformed table is a bug in the compiled-in default.toml, not a
+    // runtime condition — fail loudly rather than degrading to an empty list.
+    node.clone()
+        .try_into()
+        .unwrap_or_else(|e| panic!("bundled default config table {path:?} is malformed: {e}"))
 }
 
 fn merge_string_lists(
@@ -7023,26 +6627,70 @@ mod tests {
         path
     }
 
+    // ----- bundled default config tests -----
+
+    #[test]
+    fn partial_user_config_inherits_bundled_watch_lists() {
+        // A config.toml that omits the list sections entirely must fall back to the
+        // same lists a full config ships, not a smaller hand-maintained copy.
+        let partial = toml::from_str::<Config>("poll_interval_secs = 30\n").unwrap();
+        let bundled = bundled_default_config().unwrap();
+
+        assert_eq!(partial.apps.watch, bundled.apps.watch);
+        assert_eq!(partial.domains.watch, bundled.domains.watch);
+        // Full value comparison, not just keys: `apply_user_config` overwrites browser
+        // entries wholesale, so a drifted `history_paths` silently loses a profile.
+        assert_eq!(partial.browsers, bundled.browsers);
+        assert_eq!(partial.poll_interval_secs, 30);
+    }
+
+    #[test]
+    fn bundled_default_lists_are_populated() {
+        // Guards the include_str! -> serde default wiring: if the lookup path ever
+        // stops resolving, these silently become empty rather than failing loudly.
+        let config = Config::default();
+        assert!(
+            config.domains.watch.len() >= 20,
+            "expected the full bundled domain category set, got {}",
+            config.domains.watch.len()
+        );
+        assert!(config.apps.watch.contains_key("coding"));
+        assert!(config.domains.watch.contains_key("news"));
+        assert!(config.browsers.contains_key("firefox"));
+        assert!(config
+            .domains
+            .watch
+            .get("news")
+            .is_some_and(|d| d.iter().any(|domain| domain == "arstechnica.com")));
+    }
+
+    #[test]
+    fn bundled_default_table_returns_default_for_missing_path() {
+        let missing: BTreeMap<String, Vec<String>> =
+            bundled_default_table(&["nope", "not_a_table"]);
+        assert!(missing.is_empty());
+    }
+
     // ----- focus source tests -----
 
     #[test]
-    fn auto_detect_returns_niri_when_niri_socket_set() {
-        env::set_var("NIRI_SOCKET", "/run/user/1000/niri.sock");
-        env::set_var("HYPRLAND_INSTANCE_SIGNATURE", "some-sig");
-        let result = focus::auto_detect();
-        env::remove_var("NIRI_SOCKET");
-        env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
-        assert_eq!(result, "niri");
+    fn auto_detect_prefers_niri_over_hyprland() {
+        assert_eq!(focus::detect_from(true, true, true), "niri");
     }
 
     #[test]
     fn auto_detect_returns_hyprland_when_signature_set_and_no_niri() {
-        env::remove_var("NIRI_SOCKET");
-        env::set_var("HYPRLAND_INSTANCE_SIGNATURE", "some-sig");
-        env::remove_var("SWAYSOCK");
-        let result = focus::auto_detect();
-        env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
-        assert_eq!(result, "hyprland");
+        assert_eq!(focus::detect_from(false, true, true), "hyprland");
+    }
+
+    #[test]
+    fn auto_detect_returns_sway_when_only_swaysock_set() {
+        assert_eq!(focus::detect_from(false, false, true), "sway");
+    }
+
+    #[test]
+    fn auto_detect_falls_back_to_river() {
+        assert_eq!(focus::detect_from(false, false, false), "river");
     }
 
     #[test]

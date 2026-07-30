@@ -33,13 +33,23 @@ pub trait FocusSource: Send {
 /// Probe environment variables and return the best focus source name.
 /// Priority: NIRI_SOCKET > HYPRLAND_INSTANCE_SIGNATURE > SWAYSOCK > WAYLAND_DISPLAY (river).
 pub fn auto_detect() -> &'static str {
-    if std::env::var_os("NIRI_SOCKET").is_some() {
+    detect_from(
+        std::env::var_os("NIRI_SOCKET").is_some(),
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
+        std::env::var_os("SWAYSOCK").is_some(),
+    )
+}
+
+/// Priority ladder for [`auto_detect`], split out so it can be tested without
+/// mutating process-global env vars (which races under the parallel test runner).
+pub fn detect_from(niri: bool, hyprland: bool, sway: bool) -> &'static str {
+    if niri {
         return "niri";
     }
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+    if hyprland {
         return "hyprland";
     }
-    if std::env::var_os("SWAYSOCK").is_some() {
+    if sway {
         return "sway";
     }
     "river"
