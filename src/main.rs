@@ -260,7 +260,7 @@ fn run_export(since: Option<&str>, until: Option<&str>) -> Result<()> {
         .transpose()?
         .map(|d| d + Duration::days(1));
     let in_range =
-        |start: DateTime<Utc>| lo.map_or(true, |l| start >= l) && hi.map_or(true, |h| start < h);
+        |start: DateTime<Utc>| lo.is_none_or(|l| start >= l) && hi.is_none_or(|h| start < h);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -447,6 +447,9 @@ impl ConfigIndex {
                 domain_categories.push((domain.clone(), category.clone()));
             }
         }
+        // Longest candidate first, so a specific host beats the broader one it sits
+        // under (drive.google.com over google.com) whatever the categories are named.
+        domain_categories.sort_by_key(|(domain, _)| std::cmp::Reverse(domain.len()));
 
         let browser_app_ids = config
             .browsers
@@ -970,7 +973,16 @@ fn run_daemon() -> Result<()> {
         config.focus_source.kind.clone()
     };
 
-    let initial_pause = load_pause_state(&db)?;
+    // An idle pause mirrors live compositor input state. A fresh idle notification only
+    // emits `resumed` after its own `idled`, so a restored idle pause would never clear
+    // and the daemon would record nothing. Manual pauses do survive a restart.
+    let initial_pause = match load_pause_state(&db)? {
+        Some(info) if info.reason == PauseReason::Idle => {
+            persist_pause_state(&db, None)?;
+            None
+        }
+        other => other,
+    };
     let notifier: Arc<dyn notifications::NotificationSink> = if config.notifications.enabled {
         Arc::new(notifications::DesktopNotifier::new())
     } else {
@@ -1083,11 +1095,7 @@ fn run_daemon() -> Result<()> {
 fn run_wayland_idle_listener(state: &AppState) -> Result<()> {
     use wayland_client::Connection as WConnection;
 
-    let timeout_ms: u32 = state
-        .config
-        .lock()
-        .map(|c| (c.breaks.min_break_secs.max(1) as u32).saturating_mul(1000))
-        .unwrap_or(300_000);
+    let timeout_ms = idle_timeout_ms(state);
 
     let conn = WConnection::connect_to_env().context("wayland connect")?;
     let mut event_queue = conn.new_event_queue::<IdleClient>();
@@ -1101,7 +1109,6 @@ fn run_wayland_idle_listener(state: &AppState) -> Result<()> {
         notifier: None,
         notification: None,
         timeout_ms,
-        attempted: false,
     };
 
     // First roundtrip surfaces the globals.
@@ -1113,13 +1120,29 @@ fn run_wayland_idle_listener(state: &AppState) -> Result<()> {
         .roundtrip(&mut client)
         .context("wayland roundtrip 2")?;
 
-    client.try_subscribe(&qh)?;
+    client.try_subscribe(&qh);
 
     loop {
         event_queue
             .blocking_dispatch(&mut client)
             .context("wayland dispatch")?;
+        // The notification's timeout is fixed at creation, so `set-breaks` only lands
+        // after a re-subscribe. Returning lets the caller reconnect with the new value.
+        // ponytail: re-arms on the next idle event rather than polling the Wayland fd,
+        // so a changed min_break_secs takes effect one idle cycle late.
+        if idle_timeout_ms(&client.state) != client.timeout_ms {
+            return Ok(());
+        }
     }
+}
+
+/// Wayland idle timeout in ms: `breaks.min_break_secs`, the "idle counts as a break" knob.
+fn idle_timeout_ms(state: &AppState) -> u32 {
+    state
+        .config
+        .lock()
+        .map(|c| c.breaks.min_break_secs.clamp(1, 86_400) as u32 * 1000)
+        .unwrap_or(300_000)
 }
 
 struct IdleClient {
@@ -1128,21 +1151,17 @@ struct IdleClient {
     notifier: Option<wayland_protocols::ext::idle_notify::v1::client::ext_idle_notifier_v1::ExtIdleNotifierV1>,
     notification: Option<wayland_protocols::ext::idle_notify::v1::client::ext_idle_notification_v1::ExtIdleNotificationV1>,
     timeout_ms: u32,
-    attempted: bool,
 }
 
 impl IdleClient {
-    fn try_subscribe(&mut self, qh: &wayland_client::QueueHandle<Self>) -> Result<()> {
-        if self.notification.is_some() || self.attempted {
-            return Ok(());
+    fn try_subscribe(&mut self, qh: &wayland_client::QueueHandle<Self>) {
+        if self.notification.is_some() {
+            return;
         }
         let (Some(seat), Some(notifier)) = (self.seat.as_ref(), self.notifier.as_ref()) else {
-            return Ok(());
+            return;
         };
-        let notification = notifier.get_idle_notification(self.timeout_ms, seat, qh, ());
-        self.notification = Some(notification);
-        self.attempted = true;
-        Ok(())
+        self.notification = Some(notifier.get_idle_notification(self.timeout_ms, seat, qh, ()));
     }
 
     fn on_idled(&self) {
@@ -2318,14 +2337,21 @@ fn handle_focus_change_with(
     let now = Utc::now();
     let config = state.config.lock().unwrap().clone();
 
-    // Auto-clear a stale manual pause once the user is active again after at
-    // least min_break_secs. The break has effectively been taken; resume.
+    // Auto-clear a stale pause once the user is active again.
     if current_window.is_some() {
         let mut tracking = state.tracking_state.lock().unwrap();
         if let Some(info) = *tracking {
-            if info.reason == PauseReason::Manual
-                && (now - info.at).num_seconds() >= config.breaks.min_break_secs
-            {
+            let stale = match info.reason {
+                // The break has effectively been taken; resume.
+                PauseReason::Manual => {
+                    (now - info.at).num_seconds() >= config.breaks.min_break_secs
+                }
+                // Focus moved while idle-paused, so the compositor's `resumed` never
+                // reached us (Wayland reconnect, compositor restart). Resume anyway,
+                // otherwise nothing else clears the pause and tracking stays dead.
+                PauseReason::Idle => true,
+            };
+            if stale {
                 let db = state.db.lock().unwrap();
                 persist_pause_state(&db, None)?;
                 meta_set(&db, "session_reset_at", &now.to_rfc3339())?;
@@ -6311,6 +6337,61 @@ mod tests {
         assert!(
             state.tracking_state.lock().unwrap().is_some(),
             "manual pause should persist before min_break"
+        );
+    }
+
+    #[test]
+    fn idle_pause_clears_on_focus_activity_without_resumed_event() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let info = PauseInfo {
+            at: Utc::now() - Duration::seconds(5),
+            reason: PauseReason::Idle,
+        };
+        persist_pause_state(&db, Some(info)).unwrap();
+        let state = AppState {
+            config: Arc::new(Mutex::new(Arc::new(Config::default()))),
+            db: Arc::new(Mutex::new(db)),
+            db_state_path: Arc::new(Mutex::new(default_state_path())),
+            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
+            last_rebuild: Arc::new(Mutex::new(None)),
+            tracking_state: Arc::new(Mutex::new(Some(info))),
+            focus_source_kind: Arc::new("niri".to_string()),
+            notifier: Arc::new(notifications::NullNotifier),
+            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
+        };
+
+        let window = focus::FocusedWindow {
+            window_id: Some(7),
+            app_id: "code".to_string(),
+            title: "src/main.rs".to_string(),
+            pid: None,
+        };
+        handle_focus_change_with(&state, Some(window)).unwrap();
+
+        assert!(
+            state.tracking_state.lock().unwrap().is_none(),
+            "idle pause should clear on activity even before min_break"
+        );
+        let db = state.db.lock().unwrap();
+        assert!(meta_get(&db, "paused_reason").unwrap().is_none());
+        assert!(open_app_identity(&db).unwrap().is_some(), "should retrack");
+    }
+
+    #[test]
+    fn domain_category_prefers_the_most_specific_host() {
+        let config = Config::default();
+        assert_eq!(
+            config.category_for_domain("drive.google.com"),
+            Some("storage".to_string())
+        );
+        assert_eq!(
+            config.category_for_domain("google.com"),
+            Some("search".to_string())
+        );
+        assert_eq!(
+            config.category_for_domain("hub.docker.com"),
+            Some("devops".to_string())
         );
     }
 

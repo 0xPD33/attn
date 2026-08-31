@@ -37,7 +37,7 @@ Threads:
 - **Heartbeat** (30 s): writes `meta.last_heartbeat_at`. On startup, if last heartbeat is `>60 s` stale, any still-open interval is retroactively capped at the heartbeat timestamp. Catches ungraceful suspend / crash / kill.
 - **Notification check** (60 s): evaluates break-overdue and per-category budget-exceeded conditions and pushes at most one notification per session / per category per day. See [Notifications](#notifications).
 - **D-Bus sleep listener**: subscribes to `org.freedesktop.login1.Manager.PrepareForSleep` on the system bus. On `(true)` (imminent suspend), closes the current open interval cleanly. Reconnects after 10 s on error.
-- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. On `idled` event, auto-pauses tracking with `reason = idle`. On `resumed`, clears the idle pause, stamps `session_reset_at`, and reopens an interval for the current focus. Retries every 5 s on Wayland connection loss.
+- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. On `idled` event, auto-pauses tracking with `reason = idle`. On `resumed`, clears the idle pause, stamps `session_reset_at`, and reopens an interval for the current focus. Retries every 5 s on Wayland connection loss, and re-subscribes the same way once `set-breaks` changes `min_break_secs`.
 - **Config watcher** (3 s mtime poll): on `~/.config/attn/config.toml` save, calls the same path as `attn reload`. Eliminates the manual reload step.
 - **Signal handler**: on SIGINT/SIGTERM, closes the open app interval and any open media intervals cleanly and unlinks the socket, so totals on next start are correct. A second signal exits immediately.
 
@@ -208,7 +208,7 @@ When any step matches, the `app_id` of the resulting interval is replaced with t
 Two layers, layered on each other:
 
 - **Interval cap** (`idle_after_secs`, default 300 s): every interval's effective end is clamped to `started_at + idle_after_secs` at aggregation time. A focused window left open while you are away therefore contributes at most 5 minutes. Rows closed at less than their wall-clock duration are marked `idle_adjusted = 1` so reports can distinguish observed focus from capped focus.
-- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). On `idled`, tracking is auto-paused (`paused_reason = idle`). On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. The pause state is persisted in `meta` so it survives daemon restart.
+- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). On `idled`, tracking is auto-paused (`paused_reason = idle`). On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. Only a `manual` pause is restored from `meta` at startup; an idle pause is dropped, because a fresh notification never emits `resumed` without its own `idled` first.
 
 ## Pause / break state machine
 
@@ -220,7 +220,7 @@ Tracking has exactly one pause state, held in memory as `Option<PauseInfo>` and 
 | → paused (`idle`) | Wayland `idled` | close the open interval, persist pause |
 | → running | `break_end` / `attn break-end` | clear pause, stamp `session_reset_at = now`, reopen an interval for current focus |
 | → running | Wayland `resumed` (only if reason is `idle`) | same as above |
-| → running | any focus event or terminal poll, when reason is `manual` and the pause is at least `min_break_secs` old | same as above — the break has effectively been taken, so a stale manual pause self-clears rather than silently swallowing a day |
+| → running | any focus event or terminal poll, when reason is `manual` and the pause is at least `min_break_secs` old, or whenever reason is `idle` | same as above — a stale manual pause self-clears rather than silently swallowing a day, and an idle pause self-clears because focus activity means the `resumed` event never arrived |
 
 While paused, focus changes close any open interval and open nothing. `active_session_seconds` reports 0 and `break_overdue` is false.
 
@@ -302,7 +302,7 @@ editor = ["nvim", "vim", "hx", "helix", "emacs"]
 
 When resolving the category for an app id, `apps.watch` is consulted first; if no hit, `terminals.apps` provides the fallback. This means a focused interval with `app_id = "claude"` lands in the `ai` category without needing a duplicate entry under `apps.watch.ai`.
 
-Domain matching supports exact match and suffix match (`www.youtube.com` matches `youtube.com`), but never substring (`notyoutube.com` does not match `youtube.com`). App IDs and domains are normalized (lowercased, trimmed, leading `www.` stripped) on both sides of every comparison.
+Domain matching supports exact match and suffix match (`www.youtube.com` matches `youtube.com`), but never substring (`notyoutube.com` does not match `youtube.com`). Candidates are tried longest-first, so the most specific host wins (`drive.google.com` resolves to `storage`, not to `search` via `google.com`). App IDs and domains are normalized (lowercased, trimmed, leading `www.` stripped) on both sides of every comparison.
 
 The shipped defaults cover 27 distinct category names: `ai`, `chat`, `coding`, `design`, `devops`, `editor`, `email`, `finance`, `food`, `games`, `health`, `learning`, `media`, `meeting`, `music`, `news`, `productivity`, `read_later`, `reference`, `scroll`, `search`, `shopping`, `sports`, `storage`, `terminal`, `travel`, `video`. Each has a distinct hue in the popup palette; anything else falls back to the neutral accent.
 

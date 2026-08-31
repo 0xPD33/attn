@@ -15,7 +15,6 @@ rosetta.stone.com
 frontendmasters.com
 egghead.io
 pluralsight.com
-linkedin.com/learning
 
 # Practice
 leetcode.com
@@ -25,10 +24,6 @@ exercism.org
 adventofcode.com
 advent-of-code.com
 projecteuler.net
-
-# YouTube edu surfaces
-youtube.com/learn
-youtube.com/edu
 
 # Skill / craft
 skillshare.com

@@ -39,5 +39,4 @@ expensify.com
 
 # Markets / data
 tradingview.com
-yahoo.com/finance
 finance.yahoo.com

@@ -413,11 +413,9 @@ coding = [
   "nixos.org",
   "wiki.nixos.org",
   "search.nixos.org",
-  "huggingface.co",
   "dev.to",
   "hashnode.com",
   "lobste.rs",
-  "freecodecamp.org",
 ]
 design = [
   "figma.com",
@@ -530,7 +528,6 @@ finance = [
   "splitwise.com",
   "expensify.com",
   "tradingview.com",
-  "yahoo.com/finance",
   "finance.yahoo.com",
 ]
 food = [
@@ -560,7 +557,7 @@ health = [
   "cronometer.com",
   "macrofactorapp.com",
   "strava.com",
-  "garmin.com/connect",
+  "connect.garmin.com",
   "ouraring.com",
   "whoop.com",
   "headspace.com",
@@ -582,7 +579,6 @@ learning = [
   "frontendmasters.com",
   "egghead.io",
   "pluralsight.com",
-  "linkedin.com/learning",
   "leetcode.com",
   "hackerrank.com",
   "codewars.com",
@@ -590,8 +586,6 @@ learning = [
   "adventofcode.com",
   "advent-of-code.com",
   "projecteuler.net",
-  "youtube.com/learn",
-  "youtube.com/edu",
   "skillshare.com",
   "masterclass.com",
   "datacamp.com",
@@ -680,7 +674,6 @@ news = [
   "dw.com",
   "substack.com",
   "ground.news",
-  "google.com/news",
   "news.google.com",
   "rss.app",
   "feedly.com",
@@ -742,7 +735,6 @@ reference = [
   "merriam-webster.com",
   "dictionary.com",
   "thesaurus.com",
-  "stackoverflow.com",
 ]
 scroll = [
   "reddit.com",
@@ -769,20 +761,16 @@ scroll = [
   "snapchat.com",
   "vk.com",
   "weibo.com",
-  "pinterest.com",
 ]
 search = [
   "google.com",
-  "www.google.com",
   "duckduckgo.com",
   "kagi.com",
-  "brave.com/search",
   "search.brave.com",
   "ecosia.org",
   "bing.com",
   "qwant.com",
   "startpage.com",
-  "you.com",
   "wolframalpha.com",
 ]
 shopping = [
@@ -863,8 +851,6 @@ travel = [
   "expedia.com",
   "hotels.com",
   "skyscanner.com",
-  "google.com/flights",
-  "google.com/travel",
   "tripadvisor.com",
   "hostelworld.com",
   "agoda.com",

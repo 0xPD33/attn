@@ -61,7 +61,6 @@ dw.com
 # Newsletters / readers
 substack.com
 ground.news
-google.com/news
 news.google.com
 rss.app
 feedly.com

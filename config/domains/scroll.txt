@@ -22,4 +22,3 @@ lemmy.ml
 snapchat.com
 vk.com
 weibo.com
-pinterest.com

@@ -1,10 +1,8 @@
 # attn
 
-A local attention ledger for Wayland (Niri, Hyprland, Sway, river) and [Quickshell](https://quickshell.org/).
+A local attention ledger for Wayland ([niri](https://github.com/YaLTeR/niri), [Hyprland](https://hyprland.org/), [Sway](https://swaywm.org/), [river](https://codeberg.org/river/river)) and [Quickshell](https://quickshell.org/).
 
-`attn` measures where focus actually goes across applications, which domains receive browser time (Chromium-family and Firefox-family), and which video is genuinely playing. It's intentionally observational: no blocking, no streaks. It records local evidence, surfaces a discreet indicator in your bar, and optionally pings a desktop notification when a break is overdue or a daily budget is reached.
-
-> **Status:** V1, single-user, NixOS-tested with Niri + Quickshell, also runs on Hyprland, Sway, and river via the `focus_source.kind` config. The Rust daemon and CLI build on any Linux with `/proc`; the Quickshell widget is the optional UI layer.
+`attn` records where your focus actually goes: which apps, which domains inside the browser, which video really plays. It only observes — no blocking, no scores. It keeps the evidence locally, shows a small indicator in your bar, and can notify you when a break is overdue or a daily budget runs out.
 
 ![attn popup - Today view](docs/screenshots/popup-today.png)
 
@@ -15,45 +13,48 @@ A local attention ledger for Wayland (Niri, Hyprland, Sway, river) and [Quickshe
 
 ## What it tracks
 
-- **App focus time** from your compositor's IPC (Niri, Hyprland, Sway, river — auto-detected, overridable via `focus_source.kind`).
-- **Terminal subprocess**. If you're in `ghostty` and run `claude`, the daemon attributes time to `claude`, not `ghostty`. Detection uses (1) window title, (2) a per-window cache of the last resolved program, (3) a live tmux query if tmux is in the descendant tree, (4) a `/proc` descendant walk with start-time tiebreak.
-- **Browser domain time** for Chromium-family (Helium, Brave, Chrome, Chromium) and Firefox-family (Firefox, Zen, LibreWolf, Floorp) browsers, clipped to intervals where that browser actually had focus. Domain time can never grow while the browser is unfocused.
-- **Video playback** via MPRIS, so a 2-hour film counts as 2 hours instead of one navigation event. Only counted while the playing browser has focus and the tab is on a known video domain.
-- **Focus metrics** derived from the same ledger: context switches, longest uninterrupted stretch, 25-minute deep-work blocks, and the day's work window.
-- **Idle handling**. A focused interval that doesn't change for 5 minutes is capped, so an unattended tab doesn't inflate today's total.
+- **App focus time** from your compositor IPC. Auto-detected; override with `focus_source.kind`.
+- **Terminal subprocess.** Run `claude` inside `ghostty` and the time goes to `claude`, not `ghostty`. Detection uses the window title, a per-window cache, a live tmux query, then a `/proc` walk.
+- **Browser domain time** for the Chromium family (Helium, Brave, Chrome, Chromium) and the Firefox family (Firefox, Zen, LibreWolf, Floorp). Domain time only grows while that browser holds focus.
+- **Video playback** through MPRIS, so a two-hour film counts as two hours instead of one navigation event. It counts only while the playing browser has focus and the tab sits on a known video domain.
+- **Focus metrics**: context switches, longest unbroken stretch, 25-minute deep-work blocks, the day's work window.
+- **Idle capping.** A focused interval that never changes stops counting after 5 minutes, so an unattended tab cannot inflate the day.
 
-## What it doesn't do
+## What it does not do
 
-No blocking. No gating. No interventions. No cloud sync. No telemetry. No per-tab live tracking. No AI summaries. No streaks or scores. The only thing it will ever do unprompted is a desktop notification when a break is overdue or a daily category budget is spent — both opt-in, both off with one line of config. If you want behavior change, this is the wrong tool. It's a notebook, not a coach.
+No blocking. No gating. No interventions. No cloud sync. No telemetry. No per-tab live tracking. No AI summaries. No streaks or scores.
+
+The only unprompted thing it does is one desktop notification, for an overdue break or a spent daily budget. Both are opt-in and one config line turns them off. It is a notebook, not a coach.
 
 ## How it works
 
-Read **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the whole picture: the data model and SQLite schema, how focus attribution and terminal-subprocess resolution work, how browser and MPRIS time is clipped to actual focus, the socket API and status JSON, and the failure modes. Start there if you're changing the code or wondering why a number looks the way it does.
+**[ARCHITECTURE.md](./ARCHITECTURE.md)** covers the data model and SQLite schema, focus attribution, terminal-subprocess resolution, how browser and MPRIS time clips to real focus, the socket API, and the failure modes. Read it before you change the code, or when a number looks wrong.
 
 ## Privacy
 
-All state is local. The SQLite ledger lives at `~/.local/state/attn/attn.sqlite` (mode 0600). The Unix socket lives at `$XDG_RUNTIME_DIR/attn.sock` (user-only). Browser history is snapshot-copied before reading, then deleted. The daemon never reads live against your browser and has no network code path.
+All state stays local. The SQLite ledger sits at `~/.local/state/attn/attn.sqlite` (mode 0600), the Unix socket at `$XDG_RUNTIME_DIR/attn.sock` (user only). The daemon snapshots browser history, reads the copy, then deletes it — it never touches your live browser database. There is no network code path.
 
 ## Install
 
 ### One-line installer (Linux, x86_64 or aarch64)
 
-Requires a supported Wayland compositor running: [niri](https://github.com/YaLTeR/niri), [Hyprland](https://hyprland.org/), [Sway](https://swaywm.org/), or [river](https://codeberg.org/river/river). Without one, app tracking won't do anything.
+You need a supported Wayland compositor running: niri, Hyprland, Sway or river. Without one, app tracking does nothing.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/0xPD33/attn/main/scripts/install.sh | sh
 ```
 
-What it does: fetches the latest GitHub Release tarball, verifies its sha256, places the `attn` binary at `~/.local/bin/attn`, runs `attn init` or `attn init --merge` for the config, and drops a systemd user unit at `~/.config/systemd/user/attn.service`. It does **not** enable or start the service unless you set `ATTN_START=1`.
+It fetches the latest GitHub Release tarball, verifies its sha256, installs the binary to `~/.local/bin/attn`, runs `attn init` (or `--merge`), and writes `~/.config/systemd/user/attn.service`. It does **not** enable or start the service unless you set `ATTN_START=1`.
 
-Environment overrides: `ATTN_VERSION=v0.1.0` to pin a tag, `ATTN_PREFIX=$HOME/bin` for a different install dir, `ATTN_SYSTEMD=0` to skip the systemd unit, `ATTN_START=1` to enable + start the service immediately, `ATTN_SKIP_COMPOSITOR_CHECK=1` to install without a supported compositor.
+| Environment override | Effect |
+|---|---|
+| `ATTN_VERSION=v0.1.0` | pin a release tag |
+| `ATTN_PREFIX=$HOME/bin` | install somewhere else |
+| `ATTN_SYSTEMD=0` | skip the systemd unit |
+| `ATTN_START=1` | enable and start the service straight away |
+| `ATTN_SKIP_COMPOSITOR_CHECK=1` | install without a supported compositor |
 
-Verify the binary:
-
-```sh
-attn --help
-attn doctor
-```
+Check it with `attn --help` and `attn doctor`.
 
 ### As a Nix flake
 
@@ -81,9 +82,9 @@ attn doctor
 }
 ```
 
-`programs.attn.configText` lets you override the default config inline.
+`programs.attn.configText` overrides the default config inline.
 
-`programs.attn.quickshell.enable` only installs the indicator component. If a separate Home Manager module already owns your entire `~/.config/quickshell` tree, leave this disabled and copy `quickshell/AttnIndicator.qml`, `AttnPopup.qml`, and `AttnRow.qml` into that tree manually.
+`programs.attn.quickshell.enable` installs the indicator only. If another Home Manager module owns your whole `~/.config/quickshell` tree, leave it disabled and copy the three files from `quickshell/` in by hand. They are self-contained on purpose — hardcoded colours, no imports beyond `QtQuick` and `Quickshell` — so they drop into any tree. Restyle your copy if you want, but keep that edit in your tree.
 
 ### Standalone build
 
@@ -103,23 +104,14 @@ nix build .#default
 ## Configure
 
 ```sh
-attn init                # writes ~/.config/attn/config.toml from the bundled default
+attn init                # write ~/.config/attn/config.toml from the bundled default
 attn init --merge        # add new bundled defaults to an existing config
 attn init --force        # overwrite
 $EDITOR ~/.config/attn/config.toml
-# daemon auto-reloads on save (mtime watch); `attn reload` available as a manual nudge
+# the daemon reloads on save (mtime watch); `attn reload` is the manual nudge
 ```
 
-The default config covers the common app IDs and domain lists. **Want to add a category or domain to the shipped defaults so everyone benefits?** The watch lists live in per-category text files (one item per line, `#` comments allowed):
-
-- `config/apps/<category>.txt` - Linux app IDs / executable names
-- `config/domains/<category>.txt` - domains for browser history matching
-
-Edit the relevant file, run `tools/sync-default-config.sh` to regenerate `config/default.toml`, and open a PR. CI verifies the regenerated TOML matches the per-category sources.
-
-Non-list runtime config (paths, intervals, browsers, terminals, breaks, notifications) lives in `config/runtime.toml`. `config/default.toml` is the generated union of both and is the single source of truth for the bundled defaults - the daemon embeds it at compile time and the Nix flake reads the same file, so don't hand-edit it.
-
-Your own `~/.config/attn/config.toml` only needs to state its differences: watch lists merge per category on top of the bundled defaults, everything else replaces. For example:
+The bundled default already covers the common app IDs and domains, so your own config only states the differences. Watch lists merge per category on top of the defaults; everything else replaces.
 
 ```toml
 poll_interval_secs = 60
@@ -163,15 +155,22 @@ budget_exceeded = true
 daily_budget_secs = 1800   # amber past 30 min/day; 0 or absent means no budget
 ```
 
-Break, budget, notification and focus-source settings are also editable from the popup's settings sheet, or from the CLI (`attn set-breaks`, `attn set-budget`, `attn set-notifications`, `attn set-focus-source`) - the CLI variants rewrite `config.toml` in place, preserving your comments.
+Breaks, budgets, notifications and the focus source are also editable from the popup settings sheet, or from `attn set-breaks`, `attn set-budget`, `attn set-notifications` and `attn set-focus-source`. The CLI rewrites `config.toml` in place and keeps your comments.
 
-For how the numbers are actually derived, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+### Adding to the shipped lists
+
+Want a category or domain added for everyone? The watch lists live in per-category text files, one item per line, `#` comments allowed:
+
+- `config/apps/<category>.txt` — Linux app IDs and executable names
+- `config/domains/<category>.txt` — domains for browser history matching
+
+Edit the file, run `tools/sync-default-config.sh`, then open a PR. CI checks the regenerated `config/default.toml` still matches the sources.
+
+Everything else (paths, intervals, browsers, terminals, breaks, notifications) lives in `config/runtime.toml`. `config/default.toml` is the generated union of both — the daemon embeds it at compile time and the Nix flake reads the same file, so never hand-edit it.
 
 ## Run
 
-### As a user systemd service (Home Manager)
-
-Set `programs.attn.daemon.enable = true` and Home Manager will register `attn.service` under your user. Start / stop / check it normally:
+Set `programs.attn.daemon.enable = true` and Home Manager registers `attn.service` under your user:
 
 ```sh
 systemctl --user status  attn
@@ -179,11 +178,7 @@ systemctl --user restart attn
 journalctl --user -u attn -f
 ```
 
-### Manually
-
-```sh
-attn daemon
-```
+Or run `attn daemon` yourself.
 
 ## CLI
 
@@ -204,7 +199,7 @@ attn categorize     --kind=app|domain --id=ID --category=NAME
 attn export         [--since=YYYY-MM-DD] [--until=YYYY-MM-DD]
 ```
 
-`attn export` dumps the raw ledger as CSV on stdout - one row per app interval and domain interval, with `kind,started_at,ended_at,duration_secs,id,category,detail`. It reads the state DB directly, so it works with the daemon stopped.
+`attn export` writes the raw ledger as CSV to stdout, one row per app and domain interval, as `kind,started_at,ended_at,duration_secs,id,category,detail`. It reads the state DB directly, so it works while the daemon is stopped.
 
 Abridged `status` output:
 
@@ -237,17 +232,17 @@ Abridged `status` output:
 }
 ```
 
-The real response also carries `days[]` (today plus the previous 6), the `media` list, `uncategorized_apps` / `uncategorized_domains`, the break and notification settings, and the day's work window. See ARCHITECTURE.md for the full shape.
+The real response also carries `days[]` (today plus the previous six), the `media` list, `uncategorized_apps` and `uncategorized_domains`, the break and notification settings, and the day's work window. ARCHITECTURE.md has the full shape.
 
 ## Quickshell widget
 
 Three QML files under `quickshell/`:
 
-- `AttnIndicator.qml`: bar chip. Polls `attn status --json` (fast initial polls, then every 5 s). Dims when stale, brightens when fresh; pulses amber when a break is overdue or tracking is paused.
-- `AttnPopup.qml`: clicking the chip opens a popup. **Today** shows a stacked category bar with budget stripes, the focus-metrics line, top items, category filter chips, side-by-side Apps / Domains lists, and an **Other** drawer where uncategorized items can be filed into a category in one click. **Week** shows the last 7 days as stacked bars. The gear icon opens a settings sheet for break reminders, per-category budgets, notification toggles, and the focus source.
-- `AttnRow.qml`: list row used by the popup.
+- `AttnIndicator.qml` — the bar chip. Polls `attn status --json`, fast at first, then every 5 s. Dims when the data goes stale; pulses amber when a break is overdue or tracking is paused.
+- `AttnPopup.qml` — the popup the chip opens. **Today** shows a stacked category bar with budget stripes, the focus-metrics line, top items, filter chips, and side-by-side Apps and Domains lists. Its **Other** drawer files an uncategorized item into a category in one click. **Week** shows the last 7 days as stacked bars. The gear icon opens the settings sheet.
+- `AttnRow.qml` — the list row the popup uses.
 
-If you used `programs.attn.quickshell.enable = true`, only the indicator is installed. Wire the popup into your own bar manually. The reference wiring lives in the home-manager Quickshell config that owns `Bar.qml` for this project.
+`quickshell.enable = true` installs the indicator only, so wire the popup into your own bar yourself. The reference wiring lives in the home-manager Quickshell config that owns `Bar.qml` for this project.
 
 ## Development
 
@@ -257,7 +252,7 @@ cargo test
 cargo build --release
 ```
 
-The test suite covers focus resolution and compositor auto-detection, terminal subprocess detection, Chromium and Firefox snapshot reading, domain attribution and the video-title override, MPRIS media gating, idle capping, pause transitions, config merging and watch-list classification, daily-totals rebuild, focus metrics, budget thresholds, notification dedup, and the `toml_edit` config-writing commands. Tests use in-memory or temp-file SQLite.
+The tests cover focus resolution, terminal subprocess detection, browser snapshot reading, domain attribution, MPRIS gating, idle capping, pause transitions, config merging, the daily-totals rebuild, focus metrics, budgets, and notification dedup. They run against in-memory or temp-file SQLite.
 
 ## License
 

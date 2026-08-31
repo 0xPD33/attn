@@ -5,7 +5,7 @@ myfitnesspal.com
 cronometer.com
 macrofactorapp.com
 strava.com
-garmin.com/connect
+connect.garmin.com
 ouraring.com
 whoop.com
 headspace.com

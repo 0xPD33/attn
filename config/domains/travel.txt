@@ -4,8 +4,6 @@ kayak.com
 expedia.com
 hotels.com
 skyscanner.com
-google.com/flights
-google.com/travel
 tripadvisor.com
 hostelworld.com
 agoda.com

@@ -90,10 +90,8 @@ podman.io
 nixos.org
 wiki.nixos.org
 search.nixos.org
-huggingface.co
 
 # Dev communities
 dev.to
 hashnode.com
 lobste.rs
-freecodecamp.org
