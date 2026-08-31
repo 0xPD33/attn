@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-31
+
+### Fixed
+- **Auto-pause on idle could stick forever and silently stop all tracking**: only the Wayland `resumed` event ever cleared a `PauseReason::Idle` pause, and `ext_idle_notification_v1` emits `resumed` only after its own `idled`. A pause that outlived the notification which created it therefore had nothing left to clear it. Two paths reached that state. The daemon restored a persisted idle pause at startup, so a reboot while idle came back paused and recorded nothing until the user idled a full `min_break_secs` and returned. A compositor restart or a Wayland reconnect subscribed a fresh notification with the same result, without even restarting the daemon. `run_daemon` now drops a restored idle pause and keeps only manual ones. `handle_focus_change_with` now clears an idle pause on any focus activity, with no time gate, because focus movement proves the `resumed` event never arrived. Manual pauses still wait out `breaks.min_break_secs` as before.
+- **`set-breaks --min-break` did not move when auto-pause fires**: the Wayland idle notification fixes its timeout at creation, and the listener read `breaks.min_break_secs` once at startup. The settings sheet and `attn set-breaks` wrote the new value and updated the live config, but the compositor kept firing at the old threshold until the daemon restarted. The listener now returns when the live value diverges, and the supervising loop reconnects with the new timeout. The change lands on the next idle event rather than instantly.
+- **A broad domain shadowed a more specific one**: candidates were tried in `BTreeMap` category order, so the alphabetically first category name won instead of the most specific host. `google.com` under `search` beat `drive.google.com` under `storage`, and `docker.com` under `coding` beat `hub.docker.com` under `devops`. Candidates now sort longest-first, so specificity decides. Equal-length candidates still resolve by category name.
+- **Two `clippy::unnecessary_map_or` warnings** in the `attn export` date filter: `map_or(true, …)` is now `is_none_or(…)`. `cargo clippy --all-targets` is clean.
+
+### Changed
+- **`freecodecamp.org` now counts as `learning` instead of `coding`.** It appeared in both lists and `coding` won the tie; the site is a learning platform, so the `coding` copy went and the `learning` one stayed.
+- **`garmin.com/connect` corrected to `connect.garmin.com`**, the real host. The old entry never matched anything.
+- **README trimmed and simplified**: shorter sentences, active voice, and about 10% less prose with no facts dropped. The `ATTN_*` installer overrides are a table instead of one long sentence. Contributing to the shipped watch lists is its own subsection instead of a paragraph inside "Configure". The status blockquote at the top is gone.
+- **ARCHITECTURE.md updated** for the idle-pause and domain-matching changes: the pause state machine, the idle-notify description, the startup restore rule, and the domain-matching paragraph.
+
+### Removed
+- **14 domain entries that could never match.** Eight carried a URL path (`linkedin.com/learning`, `youtube.com/learn`, `youtube.com/edu`, `yahoo.com/finance`, `google.com/news`, `google.com/flights`, `google.com/travel`, `brave.com/search`) but the matcher compares hostnames only. Five duplicated a host that another category already claimed (`huggingface.co` and `freecodecamp.org` under `coding`, `stackoverflow.com` under `reference`, `you.com` under `search`, `pinterest.com` under `scroll`). One was `www.google.com`, which `normalize_domain` collapses onto `google.com`. The bundled list goes from 594 entries to 580. Only `freecodecamp.org` changes how anything is classified.
+- **`IdleClient.attempted`**: the flag never became true without `notification` also becoming `Some`, so the guard it fed was unreachable. `try_subscribe` also returned a `Result` that was always `Ok`.
+- **`docs/templates/`**: the implementation-plan template and its workflow doc. They described a personal agent planning process, not this project, and were committed by accident.
+
 ## [0.2.2] - 2026-07-30
 
 ### Fixed
@@ -103,7 +122,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/0xPD33/attn/releases/tag/v0.2.3
 [0.2.2]: https://github.com/0xPD33/attn/releases/tag/v0.2.2
 [0.2.1]: https://github.com/0xPD33/attn/releases/tag/v0.2.1
 [0.2.0]: https://github.com/0xPD33/attn/releases/tag/v0.2.0
