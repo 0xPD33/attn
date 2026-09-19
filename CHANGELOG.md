@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+- **One domain could absorb a whole day of browser time**: Chromium writes every hop of a redirect chain with the same `visit_time`, and the first hop has a zero `visit_duration`. `normalize_visit_ranges` looked only at the next row for a successor, saw the same instant, treated the hop as the last visit, and extended it to the end of the import window. Because the import inserts visits in start order and later visits only fill uncovered time, every later visit that day got nothing. The successor is now the next strictly later start.
+- **A failed history snapshot left an empty file in the temp dir**: `snapshot_history` did not remove the partial copy when `fs::copy` failed (for example on a full disk). It now removes it before it returns the error.
+
+### Changed
+- **`attn doctor` prints the age of each browser history DB** (`last write Nh ago`). A browser that hit a disk-full error closes its history DB until it restarts, and the stale mtime is the only visible sign that domains stopped arriving.
+
 ## [0.2.3] - 2026-08-31
 
 ### Fixed

@@ -45,19 +45,23 @@ pub(crate) fn normalize_visit_ranges(
         .collect::<Vec<_>>();
 
     for (index, visit) in visits.iter_mut().enumerate() {
-        let next_start = starts.get(index + 1).copied();
+        // Chromium stores redirect hops with one shared timestamp. The
+        // successor is the next strictly later start, never a same-instant
+        // sibling; otherwise a zero-length hop extends to `until`.
+        let next_start = starts[index + 1..]
+            .iter()
+            .copied()
+            .find(|next| *next > visit.started_at);
         if visit.ended_at <= visit.started_at {
-            visit.ended_at = next_start
-                .filter(|next| *next > visit.started_at)
-                .unwrap_or_else(|| {
-                    if visit.started_at >= since {
-                        until
-                    } else {
-                        visit.started_at
-                    }
-                });
+            visit.ended_at = next_start.unwrap_or_else(|| {
+                if visit.started_at >= since {
+                    until
+                } else {
+                    visit.started_at
+                }
+            });
         } else if let Some(next) = next_start {
-            if next > visit.started_at && next < visit.ended_at {
+            if next < visit.ended_at {
                 visit.ended_at = next;
             }
         }

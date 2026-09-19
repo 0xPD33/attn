@@ -4357,16 +4357,22 @@ fn snapshot_history(history_path: &Path, browser_name: &str) -> Result<PathBuf> 
         Utc::now().timestamp_micros()
     );
     path.push(unique);
-    fs::copy(history_path, &path).with_context(|| {
-        format!(
-            "failed to snapshot browser history {}",
-            history_path.display()
-        )
-    })?;
-    harden_file_permissions(&path)?;
-    copy_sqlite_sidecar(history_path, &path, "-wal")?;
-    copy_sqlite_sidecar(history_path, &path, "-shm")?;
-    Ok(path)
+    let result = (|| -> Result<()> {
+        fs::copy(history_path, &path).with_context(|| {
+            format!(
+                "failed to snapshot browser history {}",
+                history_path.display()
+            )
+        })?;
+        harden_file_permissions(&path)?;
+        copy_sqlite_sidecar(history_path, &path, "-wal")?;
+        copy_sqlite_sidecar(history_path, &path, "-shm")
+    })();
+    if result.is_err() {
+        // A failed copy (e.g. ENOSPC) leaves a partial file behind.
+        remove_snapshot_files(&path);
+    }
+    result.map(|_| path)
 }
 
 fn copy_sqlite_sidecar(source_db: &Path, snapshot_db: &Path, suffix: &str) -> Result<()> {
@@ -4785,7 +4791,17 @@ fn run_doctor() -> Result<()> {
             Ok(paths) => {
                 println!("browser.{name}: {} history DB(s)", paths.len());
                 for path in paths {
-                    println!("  {}", path.display());
+                    // A browser that hit a disk-full error closes its history
+                    // DB until restart; a stale mtime is the only visible sign.
+                    let age_hours = fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .map(|age| age.as_secs() / 3600);
+                    match age_hours {
+                        Some(hours) => println!("  {} (last write {hours}h ago)", path.display()),
+                        None => println!("  {}", path.display()),
+                    }
                 }
             }
             Err(error) => {

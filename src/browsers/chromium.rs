@@ -142,6 +142,41 @@ mod tests {
     }
 
     #[test]
+    fn same_timestamp_redirect_hop_does_not_extend_to_window_end() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
+        let visit = |offset_secs: i64, duration_secs: i64, domain: &str| BrowserVisit {
+            started_at: started_at + Duration::seconds(offset_secs),
+            ended_at: started_at + Duration::seconds(offset_secs + duration_secs),
+            url: format!("https://{domain}/"),
+            domain: domain.to_string(),
+            source_profile: "Default".to_string(),
+        };
+        let visits = normalize_visit_ranges(
+            vec![
+                visit(0, 0, "dreamviews.com"),
+                visit(0, 300, "dreamviews.com"),
+                visit(60, 30, "coingecko.com"),
+            ],
+            started_at - Duration::minutes(1),
+            started_at + Duration::hours(10),
+        );
+
+        assert_eq!(visits.len(), 3);
+        assert_eq!(
+            (visits[0].ended_at - visits[0].started_at).num_seconds(),
+            60
+        );
+        assert_eq!(
+            (visits[1].ended_at - visits[1].started_at).num_seconds(),
+            60
+        );
+        assert_eq!(
+            (visits[2].ended_at - visits[2].started_at).num_seconds(),
+            30
+        );
+    }
+
+    #[test]
     fn zero_duration_visit_extends_to_next_visit_start() {
         let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
         let visits = normalize_visit_ranges(
