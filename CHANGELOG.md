@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
 ### Added
 - **Game windows land in `games`**: `apps.watch` entries can now hold `*` patterns. The `games` defaults add `steam_app_*` (Proton and Steam games), `*.exe` (Wine windows) and `minecraft*`. Before, these windows had no category. Exact ids still win over patterns. The daemon rebuilds only today and yesterday, so older days keep their old categories.
 
@@ -148,7 +150,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/0xPD33/attn/releases/tag/v0.4.0
 [0.3.0]: https://github.com/0xPD33/attn/releases/tag/v0.3.0
 [0.2.3]: https://github.com/0xPD33/attn/releases/tag/v0.2.3
 [0.2.2]: https://github.com/0xPD33/attn/releases/tag/v0.2.2
