@@ -14,3 +14,7 @@ minecraft-launcher
 polymc
 retroarch
 org.libretro.RetroArch
+# Patterns: a `*` matches any text. Exact ids win over patterns.
+steam_app_*   # Proton and Steam games under XWayland
+*.exe         # Wine windows
+minecraft*    # the Minecraft window class carries the version

@@ -180,6 +180,9 @@ games = [
   "polymc",
   "retroarch",
   "org.libretro.RetroArch",
+  "steam_app_*",
+  "*.exe",
+  "minecraft*",
 ]
 media = [
   "kdenlive",

@@ -161,7 +161,7 @@ Breaks, budgets, notifications and the focus source are also editable from the p
 
 Want a category or domain added for everyone? The watch lists live in per-category text files, one item per line, `#` comments allowed:
 
-- `config/apps/<category>.txt` — Linux app IDs and executable names
+- `config/apps/<category>.txt` — Linux app IDs and executable names. A `*` matches any text, as in `steam_app_*`; exact IDs win over patterns
 - `config/domains/<category>.txt` — domains for browser history matching
 
 Edit the file, run `tools/sync-default-config.sh`, then open a PR. CI checks the regenerated `config/default.toml` still matches the sources.

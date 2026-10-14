@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+- **Game windows land in `games`**: `apps.watch` entries can now hold `*` patterns. The `games` defaults add `steam_app_*` (Proton and Steam games), `*.exe` (Wine windows) and `minecraft*`. Before, these windows had no category. Exact ids still win over patterns. The daemon rebuilds only today and yesterday, so older days keep their old categories.
+
 ## [0.3.0] - 2026-10-14
 
 ### Fixed

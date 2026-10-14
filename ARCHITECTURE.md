@@ -305,6 +305,8 @@ editor = ["nvim", "vim", "hx", "helix", "emacs"]
 
 When resolving the category for an app id, `apps.watch` is consulted first; if no hit, `terminals.apps` provides the fallback. This means a focused interval with `app_id = "claude"` lands in the `ai` category without needing a duplicate entry under `apps.watch.ai`.
 
+An `apps.watch` entry with a `*` is a glob pattern. Patterns are tried last, after both exact lookups, longest pattern first. The `games` defaults use them because game windows have no fixed app id: Proton games get `steam_app_<id>`, Wine windows get `<name>.exe`, and Minecraft puts its version in the window class.
+
 Domain matching supports exact match and suffix match (`www.youtube.com` matches `youtube.com`), but never substring (`notyoutube.com` does not match `youtube.com`). Candidates are tried longest-first, so the most specific host wins (`drive.google.com` resolves to `storage`, not to `search` via `google.com`). App IDs and domains are normalized (lowercased, trimmed, leading `www.` stripped) on both sides of every comparison.
 
 The shipped defaults cover 27 distinct category names: `ai`, `chat`, `coding`, `design`, `devops`, `editor`, `email`, `finance`, `food`, `games`, `health`, `learning`, `media`, `meeting`, `music`, `news`, `productivity`, `read_later`, `reference`, `scroll`, `search`, `shopping`, `sports`, `storage`, `terminal`, `travel`, `video`. Each has a distinct hue in the popup palette; anything else falls back to the neutral accent.

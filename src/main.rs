@@ -401,6 +401,8 @@ struct Config {
 #[derive(Clone, Debug, Default)]
 struct ConfigIndex {
     app_categories: HashMap<String, String>,
+    /// `apps.watch` entries with a `*`, longest first. Exact ids win over them.
+    app_patterns: Vec<(glob::Pattern, String)>,
     terminal_categories: HashMap<String, String>,
     terminal_programs: HashMap<String, String>,
     terminal_app_ids: HashSet<String>,
@@ -411,13 +413,19 @@ struct ConfigIndex {
 impl ConfigIndex {
     fn build(config: &Config) -> Self {
         let mut app_categories = HashMap::new();
+        let mut app_patterns = Vec::new();
         for (category, ids) in &config.apps.watch {
             for id in ids {
-                app_categories
-                    .entry(id.clone())
-                    .or_insert_with(|| category.clone());
+                if !id.contains('*') {
+                    app_categories
+                        .entry(id.clone())
+                        .or_insert_with(|| category.clone());
+                } else if let Ok(pattern) = glob::Pattern::new(id) {
+                    app_patterns.push((pattern, category.clone()));
+                }
             }
         }
+        app_patterns.sort_by_key(|(pattern, _)| std::cmp::Reverse(pattern.as_str().len()));
 
         let mut terminal_categories = HashMap::new();
         let mut terminal_programs = HashMap::new();
@@ -459,6 +467,7 @@ impl ConfigIndex {
 
         Self {
             app_categories,
+            app_patterns,
             terminal_categories,
             terminal_programs,
             terminal_app_ids,
@@ -781,6 +790,13 @@ impl Config {
             .get(&normalized)
             .cloned()
             .or_else(|| self.index.terminal_categories.get(&normalized).cloned())
+            .or_else(|| {
+                self.index
+                    .app_patterns
+                    .iter()
+                    .find(|(pattern, _)| pattern.matches(&normalized))
+                    .map(|(_, category)| category.clone())
+            })
     }
 
     fn is_terminal_app(&self, app_id: &str) -> bool {
