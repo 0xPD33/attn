@@ -30,14 +30,14 @@ Long-running user process. Started on graphical session login via `systemd.user.
 Threads:
 
 - **Main / focus loop**: dispatched through the `FocusSource` trait, with one of four adapters (niri / Hyprland / Sway / river) chosen by `focus_source.kind` (default `auto`). The niri adapter consumes `niri msg -j event-stream` and handles `WindowFocusChanged` / `WorkspaceActiveWindowChanged` / `WorkspaceActivated` / `WorkspacesChanged` events. The Hyprland adapter reads the socket2 event stream and re-queries `hyprctl -j activewindow`. The wlr-foreign-toplevel adapter (Sway, river) tracks `activated` state per toplevel. On each focus change, the daemon closes the previously open interval and opens a new one for the now-focused window. The adapter itself runs on its own thread and feeds an `mpsc` channel the main loop drains.
-- **Terminal poll** (`terminals.poll_secs`, default 10 s): re-runs focus resolution. Catches the case where the focused window is unchanged but a new program launched inside it (e.g. you started `claude` inside an already-focused terminal).
+- **Terminal poll** (`terminals.poll_secs`, default 10 s): re-runs focus resolution. Catches the case where the focused window is unchanged but a new program launched inside it (e.g. you started `claude` inside an already-focused terminal). It never ends a pause.
 - **Browser import** (`poll_interval_secs`, default 60 s): runs the browser history pipeline (snapshot → read → clip → write).
 - **MPRIS media poll** (2 s, not configurable): enumerates `org.mpris.MediaPlayer2.*` names on the session bus and opens/closes `media_intervals` rows for players that are actually playing in the focused browser.
 - **Socket server**: per-connection threads serving `status`, `reload`, `break_start`, `break_end`, `set_breaks`, `categorize`, `set_budget`, `set_notifications` and `set_focus_source` requests on `$XDG_RUNTIME_DIR/attn.sock`.
 - **Heartbeat** (30 s): writes `meta.last_heartbeat_at`. On startup, if last heartbeat is `>60 s` stale, any still-open interval is retroactively capped at the heartbeat timestamp. Catches ungraceful suspend / crash / kill.
 - **Notification check** (60 s): evaluates break-overdue and per-category budget-exceeded conditions and pushes at most one notification per session / per category per day. See [Notifications](#notifications).
 - **D-Bus sleep listener**: subscribes to `org.freedesktop.login1.Manager.PrepareForSleep` on the system bus. On `(true)` (imminent suspend), closes the current open interval cleanly. Reconnects after 10 s on error.
-- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. On `idled` event, auto-pauses tracking with `reason = idle`. On `resumed`, clears the idle pause, stamps `session_reset_at`, and reopens an interval for the current focus. Retries every 5 s on Wayland connection loss, and re-subscribes the same way once `set-breaks` changes `min_break_secs`.
+- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. On `idled` event, auto-pauses tracking with `reason = idle` and ends focus at the last input. On `resumed`, clears the pause of either reason, stamps `session_reset_at`, and reopens an interval for the current focus. See [Idle handling](#idle-handling). Retries every 5 s on Wayland connection loss, and re-subscribes the same way once `set-breaks` changes `min_break_secs`.
 - **Config watcher** (3 s mtime poll): on `~/.config/attn/config.toml` save, calls the same path as `attn reload`. Eliminates the manual reload step.
 - **Signal handler**: on SIGINT/SIGTERM, closes the open app interval and any open media intervals cleanly and unlinks the socket, so totals on next start are correct. A second signal exits immediately.
 
@@ -152,19 +152,20 @@ The `meta` table holds:
 |-----|---------|
 | `last_heartbeat_at` | 30 s liveness stamp; drives retroactive interval capping on restart |
 | `paused_at` / `paused_reason` | current pause state (`manual` \| `idle`) |
-| `session_reset_at` | hard boundary for the active-session walk; also the break-notification dedup key |
+| `session_reset_at` | hard boundary for the active-session walk |
 | `breaks_enabled` / `breaks_interval_secs` / `breaks_min_break_secs` | `set_breaks` overrides, layered over the TOML at load |
-| `notified_break_overdue` | last session id notified about, so one notification per session |
+| `notified_break_overdue` | start of the last session notified about, so one notification per session |
 | `notified_budget:<day>:<category>` | one budget notification per category per local day |
 
 Schema is migrated on startup: tables and indexes are `CREATE ... IF NOT EXISTS`, and missing columns (`app_intervals.window_id`, `domain_intervals.browser_name`) are added in place. Existing data is preserved.
 
 ### Quickshell widget
 
-Three QML files:
+Four QML files:
 
-- `AttnIndicator.qml`: bar chip that polls `attn status --json`. Initial polls run every 800 ms (up to three) so the chip appears quickly on startup, then settles to 5 s. Dims while stale, brightens when fresh. Border pulses amber when `break_overdue` or `paused`. Parses the whole status blob and re-exposes it as properties for the popup.
-- `AttnPopup.qml`: popup rendered when the chip is clicked. Two view modes:
+- `AttnStatus.qml`: the widget's only data source and its only command runner. It polls `attn status --json`: initial polls run every 800 ms (up to three) so the chip appears quickly on startup, then settle to 5 s. It parses the status blob into properties, with defaults for the fields the daemon omits. Every command (`break-start`, `break-end`, `set-breaks`, `set-budget`, `set-notifications`, `set-focus-source`, `categorize`) goes through one queue, so commands run one at a time in click order and a fast second click is not dropped. Each command triggers a refresh when it exits.
+- `AttnIndicator.qml`: bar chip. It owns an `AttnStatus` unless the host passes one. Dims while stale, brightens when fresh. The glyph turns amber and pulses when `break_overdue` or `paused`.
+- `AttnPopup.qml`: popup rendered when the chip is clicked. It reads the same `AttnStatus` as the chip (`status: chip.status`), so a host wires one property instead of mirroring each field. Two view modes:
   - **Today**: stats card (total, stacked category bar with per-segment budget stripes, legend with `used / budget` labels), a focus-metrics line (`N switches · longest … · N deep blocks`) and an active-window line (`active HH:MM–HH:MM`), top-item pill row, category filter chips, side-by-side Apps / Domains lists, and an **Other** drawer.
   - **Week**: 7 day rows (today + previous 6), each with date label, total duration, stacked horizontal category bar, and per-day category legend.
 - `AttnRow.qml`: single row used inside the Today lists (icon, label, mini bar, duration).
@@ -176,7 +177,7 @@ Beyond the two view modes:
 - An inline overdue banner appears at the top when `break_overdue && !paused`, leaving the data visible.
 - A full break overlay appears only when actually paused (manual or idle).
 
-The widget is pure presentation. It does not read SQLite, does not classify watch categories, does not run attribution logic. It receives a self-describing JSON blob and renders it. It does not yet render the `media` array — media time is exposed in the status JSON but has no dedicated surface in the shipped popup.
+The widget is pure presentation. It does not read SQLite, does not classify watch categories, does not run attribution logic. It receives a self-describing JSON blob and renders it. It talks to the daemon only through the CLI, never the socket, so the socket protocol stays private. One `attn status --json` costs about 10 ms of wall time and no measurable CPU, so polling through the CLI is cheap enough. It does not yet render the `media` array — media time is exposed in the status JSON but has no dedicated surface in the shipped popup.
 
 ## Focus tracking
 
@@ -186,7 +187,7 @@ The daemon dispatches to one of four `FocusSource` adapters based on `focus_sour
 
 - **niri**: subscribes to `niri msg -j event-stream` and re-queries `niri msg -j focused-window` on each focus event.
 - **Hyprland**: reads `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock` for `activewindow` / `activewindowv2` events and re-queries via `hyprctl -j activewindow`.
-- **wlr-foreign-toplevel** (Sway, river): binds `zwlr_foreign_toplevel_manager_v1` and tracks the `activated` state per toplevel via `wayland-client`.
+- **wlr-foreign-toplevel** (Sway, river): binds `zwlr_foreign_toplevel_manager_v1` and tracks the `activated` state per toplevel via `wayland-client`. It reports a focus change on each toplevel's `done` event, when the batch of `app_id`, title and state is complete. The protocol has no one-shot query, so the adapter keeps the last focus it reported and `poll_current` returns that.
 
 `kind = "auto"` probes the environment in priority order `NIRI_SOCKET` → `HYPRLAND_INSTANCE_SIGNATURE` → `SWAYSOCK` → river. The resolved kind is fixed once at daemon startup; changing `focus_source.kind` needs a restart, which is why `set_focus_source` says so in its response. Note that `status.focus_source_kind` reports the *configured* value, so it can read `"auto"`.
 
@@ -205,10 +206,10 @@ When any step matches, the `app_id` of the resulting interval is replaced with t
 
 ### Idle handling
 
-Two layers, layered on each other:
+The compositor's idle signal decides. The interval cap is the fallback for when there is none.
 
-- **Interval cap** (`idle_after_secs`, default 300 s): every interval's effective end is clamped to `started_at + idle_after_secs` at aggregation time. A focused window left open while you are away therefore contributes at most 5 minutes. Rows closed at less than their wall-clock duration are marked `idle_adjusted = 1` so reports can distinguish observed focus from capped focus.
-- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). On `idled`, tracking is auto-paused (`paused_reason = idle`). On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. Only a `manual` pause is restored from `meta` at startup; an idle pause is dropped, because a fresh notification never emits `resumed` without its own `idled` first.
+- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). `idled` fires `min_break_secs` after the last input. Tracking then auto-pauses (`paused_reason = idle`), and focus ends at the last input, not at the event: the open interval closes at `now - min_break_secs`, and any interval that ended later is trimmed back to that time. A screen locker that starts at the same timeout takes focus first and closes the interval late, so the trim matters. On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. Only a `manual` pause is restored from `meta` at startup. An idle pause is dropped at startup and again on each new subscription, because a fresh notification never emits `resumed` without its own `idled` first. If the user is still away, the next `idled` trims the time since.
+- **Interval cap** (`idle_after_secs`, default 300 s): applies only while no idle notification is live (compositor without `ext-idle-notify`, or the Wayland connection is down). The open interval then ends at most `idle_after_secs` after its start, both when it closes and in live totals. Closed rows keep their stored end. With a live notification the cap is off: 40 minutes of reading in one window is 40 minutes. Rows closed at less than their wall-clock duration are marked `idle_adjusted = 1` so reports can distinguish observed focus from capped focus. An idle inhibitor (a playing video, a game) holds `idled` back, so that time counts.
 
 ## Pause / break state machine
 
@@ -217,10 +218,12 @@ Tracking has exactly one pause state, held in memory as `Option<PauseInfo>` and 
 | Transition | Trigger | Effect |
 |---|---|---|
 | → paused (`manual`) | `break_start` socket command / `attn break-start` / popup button | close the open interval, persist pause |
-| → paused (`idle`) | Wayland `idled` | close the open interval, persist pause |
+| → paused (`idle`) | Wayland `idled` | end focus at the last input, persist pause |
 | → running | `break_end` / `attn break-end` | clear pause, stamp `session_reset_at = now`, reopen an interval for current focus |
-| → running | Wayland `resumed` (only if reason is `idle`) | same as above |
-| → running | any focus event or terminal poll, when reason is `manual` and the pause is at least `min_break_secs` old, or whenever reason is `idle` | same as above — a stale manual pause self-clears rather than silently swallowing a day, and an idle pause self-clears because focus activity means the `resumed` event never arrived |
+| → running | Wayland `resumed`, either reason | same as above. `resumed` follows at least `min_break_secs` without input, so a manual "take a break" pause also ends once the user is back |
+| → running | new idle subscription, reason `idle` only | same as above |
+
+Focus events and the terminal poll never end a pause. Both also fire while the user is away: a terminal title that keeps changing, a window that closes itself.
 
 While paused, focus changes close any open interval and open nothing. `active_session_seconds` reports 0 and `break_overdue` is false.
 
@@ -344,7 +347,7 @@ A budget is per category per local day, measured against the same category total
 
 ## Break reminder
 
-When the daemon's `[breaks]` config is enabled, status includes `active_session_seconds` and `break_overdue` (`active_session_seconds >= interval_secs && !paused`). The widget shows a subtle banner inviting a break; clicking the button (or running `attn break-start`) sets `paused_reason = manual`, closes the open interval, and stops opening new ones. `attn break-end` clears the pause, persists `session_reset_at = now` so the next session counter starts at zero, and reopens an interval for the current focus.
+When the daemon's `[breaks]` config is enabled, status includes `active_session_seconds` and `break_overdue` (`active_session_seconds >= interval_secs && !paused`). The widget shows a subtle banner inviting a break. Its button, the "break in …" chip (any time), or `attn break-start` sets `paused_reason = manual`, closes the open interval, and stops opening new ones. The pause ends on `attn break-end` or on the next `resumed`, which means the user was away for at least `min_break_secs` and came back. Either way the daemon persists `session_reset_at = now` so the next session counter starts at zero, and reopens an interval for the current focus.
 
 Auto-pause from Wayland idle uses the same state but with `paused_reason = idle` and auto-clears on the next `resumed` event.
 
@@ -352,10 +355,7 @@ Auto-pause from Wayland idle uses the same state but with `paused_reason = idle`
 
 ### Active session computation
 
-`active_session_seconds` walks the newest 1000 `app_intervals` newest-first and accumulates duration until it hits a gap `>= min_break_secs` or crosses `meta.session_reset_at`. Two defenses make this robust even when Wayland idle events are missed:
-
-- **Per-interval cap**: each *closed* interval's effective end is capped at `started_at + idle_after_secs`. A focused window left open while the user is away (no input, no focus change) creates an effective gap the walk then detects as a break, even without a Wayland `idled` event. The single open interval is deliberately exempt, so the live counter keeps moving.
-- **`session_reset_at` marker**: set on `break_end`, on Wayland `resumed`, and on a self-clearing stale manual pause, it acts as a hard boundary the walk cannot cross.
+`active_session_seconds` walks the newest 1000 `app_intervals` newest-first and accumulates duration until it hits a gap `>= min_break_secs` or crosses `meta.session_reset_at`. Closed intervals count with their stored end; the open interval counts up to now, so the live counter keeps moving. A gap in the ledger is real time away: `idled` ends focus at the last input, and suspend closes the interval. Without idle detection the cap from [Idle handling](#idle-handling) makes the gap instead. `session_reset_at` is set on `break_end` and on Wayland `resumed`. It is a hard boundary the walk cannot cross. The walk also returns the session's start, which the break notification uses as its once-per-session key.
 
 ## Focus metrics
 
@@ -381,7 +381,7 @@ budget_exceeded = true
 
 A 60-second thread evaluates two conditions, using a `NotificationSink` trait so tests can record instead of emitting. The desktop sink posts through `org.freedesktop.Notifications` via `notify-rust`.
 
-- **Break overdue** (`Normal` urgency): fires when breaks are enabled, tracking is not paused, and `active_session_seconds >= interval_secs`. Deduped on `meta.session_reset_at` written to `meta.notified_break_overdue`, so you get exactly one notification per work session, not one per minute.
+- **Break overdue** (`Normal` urgency): fires when breaks are enabled, tracking is not paused, and `active_session_seconds >= interval_secs`. Deduped on the session's start (from the active-session walk) written to `meta.notified_break_overdue`, so you get exactly one notification per work session, not one per minute. A session that ends by a gap, such as a suspend, counts as a new one.
 - **Budget exceeded** (`Low` urgency): fires for each category whose day total exceeds its `daily_budget_secs`. Deduped on `meta.notified_budget:<day>:<category>`, so once per category per local day.
 
 The sink is chosen once at daemon startup from `notifications.enabled`. Turning notifications *off* takes effect immediately (the check re-reads live config and returns early); turning them *on* from a daemon that started with them off needs a restart. A missing notification daemon degrades to a logged error — the chip and banner still surface the state.
@@ -504,7 +504,7 @@ app,2026-05-14T07:12:00+00:00,2026-05-14T07:31:00+00:00,1140,claude,ai,"claude �
 domain,2026-05-14T08:02:00+00:00,2026-05-14T08:09:00+00:00,420,github.com,coding,https://github.com/...
 ```
 
-`id` is the app ID or domain; `detail` is the window title or the visit URL. Fields are RFC-4180 quoted only when they need it. `duration_secs` for app rows applies the same `idle_after_secs` cap the totals use, so an export sums to the same numbers the popup shows. `--since` / `--until` filter on interval start; `--until` is inclusive of the whole named day. Media intervals are not exported.
+`id` is the app ID or domain; `detail` is the window title or the visit URL. Fields are RFC-4180 quoted only when they need it. `duration_secs` for app rows is the stored duration. Only a still-open row gets the `idle_after_secs` cap, because the export runs without the daemon's idle signal. `--since` / `--until` filter on interval start; `--until` is inclusive of the whole named day. Media intervals are not exported.
 
 Both timestamps are the stored UTC ISO-8601 values, unconverted — grouping into local days is the consumer's job.
 
@@ -564,7 +564,7 @@ Steady-state memory is ~40 MB and CPU is ~0% between focus events.
 | Config omits a table, or has a watch-list entry that matches nothing | Missing tables fall back to the bundled defaults; an entry that matches nothing simply never matches. Unknown keys are ignored. |
 | Config is malformed TOML, or `poll_interval_secs` / `idle_after_secs` is out of range | On reload: the error is logged and the previously loaded config stays live. At startup: the daemon refuses to start. |
 | `config.toml` edited by hand while a `set_*` command is in flight | Command aborts with `config changed on disk, retry`; the file is left as the user saved it. |
-| Wayland `ext-idle-notify-v1` unavailable | Auto-pause-on-idle disabled. Manual break-start/break-end still work. `attn doctor` reports it. |
+| Wayland `ext-idle-notify-v1` unavailable | Auto-pause-on-idle disabled, and the `idle_after_secs` cap stays on. Manual break-start works; a manual pause ends only on break-end. `attn doctor` reports it. |
 | D-Bus `org.freedesktop.login1` unreachable | Suspend/wake detection falls back to the heartbeat thread's retroactive-cap path. Logged. |
 | Daemon hard-killed mid-session | On restart, heartbeat staleness retroactively caps any still-open app interval and closes open media intervals. |
 | System suspended | D-Bus signal closes interval cleanly; on resume, focus event reopens. If D-Bus missed it, heartbeat catches up. |

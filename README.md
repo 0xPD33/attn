@@ -18,7 +18,7 @@ A local attention ledger for Wayland ([niri](https://github.com/YaLTeR/niri), [H
 - **Browser domain time** for the Chromium family (Helium, Brave, Chrome, Chromium) and the Firefox family (Firefox, Zen, LibreWolf, Floorp). Domain time only grows while that browser holds focus.
 - **Video playback** through MPRIS, so a two-hour film counts as two hours instead of one navigation event. It counts only while the playing browser has focus and the tab sits on a known video domain.
 - **Focus metrics**: context switches, longest unbroken stretch, 25-minute deep-work blocks, the day's work window.
-- **Idle capping.** A focused interval that never changes stops counting after 5 minutes, so an unattended tab cannot inflate the day.
+- **Idle detection.** Wayland idle-notify ends focus at your last input after `breaks.min_break_secs` without any, so an unattended tab cannot inflate the day. Where the compositor has no idle signal, an interval stops counting after `idle_after_secs` (5 minutes).
 
 ## What it does not do
 
@@ -73,7 +73,7 @@ Check it with `attn --help` and `attn doctor`.
           programs.attn = {
             enable = true;
             daemon.enable = true;        # user systemd service
-            quickshell.enable = true;    # install AttnIndicator.qml under ~/.config/quickshell/attn/
+            quickshell.enable = true;    # install the widget under ~/.config/quickshell/attn/
           };
         })
       ];
@@ -84,7 +84,7 @@ Check it with `attn --help` and `attn doctor`.
 
 `programs.attn.configText` overrides the default config inline.
 
-`programs.attn.quickshell.enable` installs the indicator only. If another Home Manager module owns your whole `~/.config/quickshell` tree, leave it disabled and copy the three files from `quickshell/` in by hand. They are self-contained on purpose — hardcoded colours, no imports beyond `QtQuick` and `Quickshell` — so they drop into any tree. Restyle your copy if you want, but keep that edit in your tree.
+`programs.attn.quickshell.enable` installs the four widget files under `~/.config/quickshell/attn/`. If another Home Manager module owns your whole `~/.config/quickshell` tree, leave it disabled and copy the files from `quickshell/` in by hand. They are self-contained on purpose — their own palette, no imports beyond QtQuick, QtQuick.Layouts, QtQuick.Controls.Basic and Quickshell — so they drop into any tree. Restyle your copy if you want, but keep that edit in your tree.
 
 ### Standalone build
 
@@ -236,13 +236,33 @@ The real response also carries `days[]` (today plus the previous six), the `medi
 
 ## Quickshell widget
 
-Three QML files under `quickshell/`:
+Four QML files under `quickshell/`:
 
-- `AttnIndicator.qml` — the bar chip. Polls `attn status --json`, fast at first, then every 5 s. Dims when the data goes stale; pulses amber when a break is overdue or tracking is paused.
+- `AttnStatus.qml` — the data. Polls `attn status --json`, fast at first, then every 5 s. Runs every command the widget sends back (`break-start`, `set-breaks`, `categorize`, …) one at a time, in click order, and refreshes after each.
+- `AttnIndicator.qml` — the bar chip. It owns an `AttnStatus` by default. Dims when the data goes stale; the glyph turns amber and pulses when a break is overdue or tracking is paused.
 - `AttnPopup.qml` — the popup the chip opens. **Today** shows a stacked category bar with budget stripes, the focus-metrics line, top items, filter chips, and side-by-side Apps and Domains lists. Its **Other** drawer files an uncategorized item into a category in one click. **Week** shows the last 7 days as stacked bars. The gear icon opens the settings sheet.
 - `AttnRow.qml` — the list row the popup uses.
 
-`quickshell.enable = true` installs the indicator only, so wire the popup into your own bar yourself. The reference wiring lives in the home-manager Quickshell config that owns `Bar.qml` for this project.
+Give the chip and the popup the same status object. Inside your bar's `PanelWindow`:
+
+```qml
+import "attn"
+
+AttnIndicator {
+    id: attnChip
+    onClicked: attnPopup.visible = !attnPopup.visible
+}
+
+AttnPopup {
+    id: attnPopup
+    status: attnChip.status
+    anchor.item: attnChip
+    anchor.edges: Edges.Top
+    anchor.gravity: Edges.Top
+}
+```
+
+The widget draws with its own palette, with the attn gold as the accent. `AttnPopup` and `AttnIndicator` expose it as root properties (`bgColor`, `washColor`, `textColor`, `textDim`, `accentColor`, `fontFamily` and a few more), so you can match your bar without editing the files.
 
 ## Development
 
