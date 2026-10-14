@@ -6,6 +6,7 @@
 /// `FocusEvent::Unfocused`.
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -34,18 +35,31 @@ impl FocusSource for WlrToplevelSource {
                 eprintln!("attn wlr_toplevel error: {error:#}");
             }
             thread::sleep(StdDuration::from_secs(5));
-            if sink.send(FocusEvent::Unfocused).is_err() {
+            if publish(&sink, FocusEvent::Unfocused).is_err() {
                 return Ok(());
             }
         }
     }
 
     fn poll_current(&self) -> Result<Option<FocusedWindow>> {
-        // There is no one-shot query for wlr-foreign-toplevel; return None
-        // so the daemon skips the initial open_app_interval call.  The first
-        // activate event will open an interval shortly after startup.
-        Ok(None)
+        Ok(CURRENT.lock().unwrap().clone())
     }
+}
+
+/// The last focus the toplevel loop reported. The protocol has no one-shot query, and
+/// the terminal poll and resume read focus through `poll_current`.
+static CURRENT: Mutex<Option<FocusedWindow>> = Mutex::new(None);
+
+fn publish(sink: &FocusSink, event: FocusEvent) -> Result<(), mpsc::SendError<FocusEvent>> {
+    remember(&event);
+    sink.send(event)
+}
+
+fn remember(event: &FocusEvent) {
+    *CURRENT.lock().unwrap() = match event {
+        FocusEvent::Focused(window) => Some(window.clone()),
+        FocusEvent::Unfocused => None,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -69,8 +83,8 @@ struct ToplevelState {
 }
 
 impl ToplevelState {
-    fn emit_current(&self) {
-        let event = match self
+    fn current_event(&self) -> FocusEvent {
+        match self
             .active_id
             .as_ref()
             .and_then(|id| self.toplevels.get(id))
@@ -101,8 +115,7 @@ impl ToplevelState {
                 }
             }
             None => FocusEvent::Unfocused,
-        };
-        let _ = self.sink.send(event);
+        }
     }
 }
 
@@ -152,6 +165,11 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for ToplevelState {
             _ => {}
         }
     }
+
+    // The `toplevel` event creates a handle object; without this the first one panics.
+    wayland_client::event_created_child!(ToplevelState, ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ()),
+    ]);
 }
 
 impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ToplevelState {
@@ -183,23 +201,26 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ToplevelState {
                 if let Some(info) = state.toplevels.get_mut(&id) {
                     info.activated = activated;
                 }
-                if activated {
-                    let prev = state.active_id.clone();
-                    state.active_id = Some(id.clone());
-                    if prev.as_ref() != Some(&id) {
-                        state.emit_current();
-                    }
+            }
+            // `done` applies the batch, so a new window's app_id is known by now.
+            zwlr_foreign_toplevel_handle_v1::Event::Done => {
+                let activated = state.toplevels.get(&id).is_some_and(|info| info.activated);
+                if activated && state.active_id.as_ref() != Some(&id) {
+                    state.active_id = Some(id);
+                    let _ = publish(&state.sink, state.current_event());
+                } else if activated {
+                    // Same window, maybe a new title: refresh what the poll reads.
+                    remember(&state.current_event());
                 } else if state.active_id.as_ref() == Some(&id) {
                     state.active_id = None;
-                    let _ = state.sink.send(FocusEvent::Unfocused);
+                    let _ = publish(&state.sink, FocusEvent::Unfocused);
                 }
             }
-            zwlr_foreign_toplevel_handle_v1::Event::Done => {}
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
                 state.toplevels.remove(&id);
                 if state.active_id.as_ref() == Some(&id) {
                     state.active_id = None;
-                    let _ = state.sink.send(FocusEvent::Unfocused);
+                    let _ = publish(&state.sink, FocusEvent::Unfocused);
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { .. } => {}
