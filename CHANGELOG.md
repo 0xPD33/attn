@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-14
+
 ### Fixed
 - **Long focus in one window was cut to 5 minutes and counted as a break**: the `idle_after_secs` cap clamped every closed interval to 5 minutes, even with Wayland idle detection running. 40 minutes of reading in one tab became 5 minutes of focus and a 35-minute gap. The active-session walk read that gap as a break, so the "break in" countdown jumped back and the overdue reminder rarely fired. Daily totals lost the same time. In one real week, 145 intervals (12 h) were stored at exactly 300 s, most of them browser and game sessions. The cap now applies only while no idle notification is live, and only to the open interval. Closed rows keep their stored end. Rows stored before this change keep their capped length.
 - **Each idle pause recorded `min_break_secs` of focus that never happened**: `idled` fires `min_break_secs` after the last input, and the daemon closed the interval at the event. Focus now ends at the last input. An interval that a screen locker closed at lock time is trimmed back the same way.
@@ -143,7 +145,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/0xPD33/attn/releases/tag/v0.3.0
 [0.2.3]: https://github.com/0xPD33/attn/releases/tag/v0.2.3
 [0.2.2]: https://github.com/0xPD33/attn/releases/tag/v0.2.2
 [0.2.1]: https://github.com/0xPD33/attn/releases/tag/v0.2.1
