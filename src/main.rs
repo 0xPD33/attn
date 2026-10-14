@@ -1086,6 +1086,7 @@ fn run_daemon() -> Result<()> {
         if let Err(error) = run_wayland_idle_listener(&wayland_state) {
             eprintln!("attn wayland idle listener error: {error:#}");
         }
+        IDLE_DETECTION.store(false, Ordering::Relaxed);
         thread::sleep(StdDuration::from_secs(5));
     });
 
@@ -1162,21 +1163,35 @@ impl IdleClient {
             return;
         };
         self.notification = Some(notifier.get_idle_notification(self.timeout_ms, seat, qh, ()));
+        IDLE_DETECTION.store(true, Ordering::Relaxed);
+        // A new notification sends `resumed` only after its own `idled`, so an idle pause
+        // from the old one would never clear. Resume now; the next `idled` trims the time.
+        let idle_paused = self
+            .state
+            .tracking_state
+            .lock()
+            .unwrap()
+            .is_some_and(|p| p.reason == PauseReason::Idle);
+        if idle_paused {
+            if let Err(e) = clear_pause(&self.state) {
+                eprintln!("attn idle: clear stale pause failed: {e:#}");
+            }
+        }
     }
 
     fn on_idled(&self) {
-        let now = Utc::now();
+        // `idled` fires `timeout_ms` after the last input, so focus ended back then.
+        let idle_since = Utc::now() - Duration::milliseconds(i64::from(self.timeout_ms));
         let mut current = self.state.tracking_state.lock().unwrap();
         if current.is_some() {
             return;
         }
         let info = PauseInfo {
-            at: now,
+            at: idle_since,
             reason: PauseReason::Idle,
         };
-        let config = self.state.config.lock().unwrap().clone();
         let db = self.state.db.lock().unwrap();
-        if let Err(e) = close_open_interval(&db, now, config.idle_after_secs) {
+        if let Err(e) = end_focus_at(&db, idle_since) {
             eprintln!("attn idle: close interval failed: {e:#}");
         }
         if let Err(e) = persist_pause_state(&db, Some(info)) {
@@ -1185,32 +1200,11 @@ impl IdleClient {
         *current = Some(info);
     }
 
+    /// Input after at least `timeout_ms` without any. That is a break, so it ends a manual
+    /// pause too: "Take one" resumes once the user is back.
     fn on_resumed(&self) {
-        let mut current = self.state.tracking_state.lock().unwrap();
-        let Some(info) = current.as_ref().copied() else {
-            return;
-        };
-        if info.reason != PauseReason::Idle {
-            return;
-        }
-        let now = Utc::now();
-        let db = self.state.db.lock().unwrap();
-        if let Err(e) = persist_pause_state(&db, None) {
-            eprintln!("attn idle: persist clear failed: {e:#}");
-        }
-        if let Err(e) = meta_set(&db, "session_reset_at", &now.to_rfc3339()) {
-            eprintln!("attn idle: persist session_reset failed: {e:#}");
-        }
-        *current = None;
-        drop(db);
-        if let Ok(Some(window)) = query_focused_window(&self.state) {
-            let config = self.state.config.lock().unwrap().clone();
-            let resolved =
-                resolve_focused_window(window, &config, &self.state.terminal_window_cache);
-            let db = self.state.db.lock().unwrap();
-            if let Err(e) = open_app_interval(&db, now, &resolved) {
-                eprintln!("attn idle: reopen interval failed: {e:#}");
-            }
+        if let Err(e) = clear_pause(&self.state) {
+            eprintln!("attn idle: resume failed: {e:#}");
         }
     }
 }
@@ -2337,29 +2331,8 @@ fn handle_focus_change_with(
     let now = Utc::now();
     let config = state.config.lock().unwrap().clone();
 
-    // Auto-clear a stale pause once the user is active again.
-    if current_window.is_some() {
-        let mut tracking = state.tracking_state.lock().unwrap();
-        if let Some(info) = *tracking {
-            let stale = match info.reason {
-                // The break has effectively been taken; resume.
-                PauseReason::Manual => {
-                    (now - info.at).num_seconds() >= config.breaks.min_break_secs
-                }
-                // Focus moved while idle-paused, so the compositor's `resumed` never
-                // reached us (Wayland reconnect, compositor restart). Resume anyway,
-                // otherwise nothing else clears the pause and tracking stays dead.
-                PauseReason::Idle => true,
-            };
-            if stale {
-                let db = state.db.lock().unwrap();
-                persist_pause_state(&db, None)?;
-                meta_set(&db, "session_reset_at", &now.to_rfc3339())?;
-                *tracking = None;
-            }
-        }
-    }
-
+    // Only the idle notification's `resumed` ends a pause: a focus event or the terminal
+    // poll can fire while the user is away, such as a terminal title that keeps changing.
     let paused = state.tracking_state.lock().unwrap().is_some();
     let db = state.db.lock().unwrap();
     let open = open_app_identity(&db)?;
@@ -2956,6 +2929,34 @@ fn close_open_interval(db: &Connection, now: DateTime<Utc>, idle_after_secs: i64
     Ok(())
 }
 
+/// End focus at `at`: close the open interval there and trim any interval that ran past
+/// it, such as one a screen locker's focus change closed at lock time.
+fn end_focus_at(db: &Connection, at: DateTime<Utc>) -> Result<()> {
+    let mut stmt =
+        db.prepare("SELECT id, started_at, ended_at FROM app_intervals ORDER BY id DESC LIMIT 20")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, started_at, ended_at) in rows {
+        let ended_at = ended_at.as_deref().map(parse_rfc3339_utc).transpose()?;
+        if ended_at.is_some_and(|end| end <= at) {
+            break;
+        }
+        let started_at = parse_rfc3339_utc(&started_at)?;
+        db.execute(
+            "UPDATE app_intervals SET ended_at = ?1, idle_adjusted = 1 WHERE id = ?2",
+            params![at.max(started_at).to_rfc3339(), id],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MediaSnapshot {
     playback_id: String,
@@ -3204,12 +3205,13 @@ struct MediaStatus {
     category: Option<String>,
 }
 
-fn compute_active_session_seconds(
+/// Seconds of focus since the last break, and when that session started. The start is the
+/// once-per-session key for the break-overdue notification.
+fn compute_active_session(
     db: &Connection,
     now: DateTime<Utc>,
     min_break_secs: i64,
-    idle_after_secs: i64,
-) -> Result<i64> {
+) -> Result<(i64, Option<DateTime<Utc>>)> {
     let session_reset_at = meta_get(db, "session_reset_at")?
         .map(|v| parse_rfc3339_utc(&v))
         .transpose()?;
@@ -3223,22 +3225,16 @@ fn compute_active_session_seconds(
     })?;
     let mut last_start: DateTime<Utc> = now;
     let mut session: i64 = 0;
+    let mut session_start = None;
     for r in rows {
         let (started_at, ended_at) = r?;
         let start = parse_rfc3339_utc(&started_at)?;
-        let (raw_end, is_open) = match ended_at {
-            Some(s) => (parse_rfc3339_utc(&s)?.min(now), false),
-            None => (now, true),
-        };
-        let raw_end = raw_end.max(start);
-        // Keep the live interval moving for break reminders. Closed intervals
-        // still use the idle cap so historical stale focus does not bridge
-        // across a real break.
-        let end = if is_open {
-            raw_end
-        } else {
-            (start + Duration::seconds(idle_after_secs.max(1))).min(raw_end)
-        };
+        // The live interval keeps moving for break reminders, even without idle detection.
+        let end = match ended_at {
+            Some(s) => parse_rfc3339_utc(&s)?.min(now),
+            None => now,
+        }
+        .max(start);
         if (last_start - end).num_seconds() >= min_break_secs {
             break;
         }
@@ -3253,9 +3249,10 @@ fn compute_active_session_seconds(
         };
         let dur = (end - effective_start).num_seconds().max(0);
         session += dur;
+        session_start = Some(effective_start);
         last_start = start;
     }
-    Ok(session)
+    Ok((session, session_start))
 }
 
 // ponytail: distraction categories hardcoded; move to a [focus] config table if you
@@ -3509,12 +3506,7 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
     let active_session_seconds = if paused {
         0
     } else {
-        compute_active_session_seconds(
-            db,
-            now,
-            config.breaks.min_break_secs,
-            config.idle_after_secs,
-        )?
+        compute_active_session(db, now, config.breaks.min_break_secs)?.0
     };
     let break_overdue =
         config.breaks.enabled && !paused && active_session_seconds >= config.breaks.interval_secs;
@@ -3571,15 +3563,10 @@ fn run_notification_check(state: &AppState) -> Result<()> {
     if config.notifications.break_overdue && config.breaks.enabled {
         let paused = load_pause_state(&db)?.is_some();
         if !paused {
-            let active_secs = compute_active_session_seconds(
-                &db,
-                now,
-                config.breaks.min_break_secs,
-                config.idle_after_secs,
-            )?;
+            let (active_secs, session_start) =
+                compute_active_session(&db, now, config.breaks.min_break_secs)?;
             if active_secs >= config.breaks.interval_secs {
-                // Use session_reset_at (or empty string) as the per-session dedup key.
-                let session_id = meta_get(&db, "session_reset_at")?.unwrap_or_default();
+                let session_id = session_start.map(|t| t.to_rfc3339()).unwrap_or_default();
                 let notified_session = meta_get(&db, "notified_break_overdue")?.unwrap_or_default();
                 if notified_session != session_id {
                     let overdue_secs = active_secs - config.breaks.interval_secs;
@@ -4952,16 +4939,26 @@ fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
+/// Set while a Wayland idle notification is live. Its `idled` event then ends the open
+/// interval at the last input, so the `idle_after_secs` cap would only cut real focus.
+static IDLE_DETECTION: AtomicBool = AtomicBool::new(false);
+
+/// A closed interval keeps its stored end. The open one runs to `fallback_end`, capped at
+/// `idle_after_secs` while no idle signal can close it.
+// ponytail: an idle inhibitor (a game or video left running) keeps the open interval
+// growing; add an input-only notification (ext-idle-notify v2) if that shows up in data.
 fn capped_interval_end(
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
     fallback_end: DateTime<Utc>,
     idle_after_secs: i64,
 ) -> DateTime<Utc> {
-    let raw_end = ended_at.unwrap_or(fallback_end);
-    raw_end
-        .min(started_at + Duration::seconds(idle_after_secs.max(1)))
-        .max(started_at)
+    let end = match ended_at {
+        Some(end) => end,
+        None if IDLE_DETECTION.load(Ordering::Relaxed) => fallback_end,
+        None => fallback_end.min(started_at + Duration::seconds(idle_after_secs.max(1))),
+    };
+    end.max(started_at)
 }
 
 fn normalize_domain(domain: &str) -> String {
@@ -5558,10 +5555,11 @@ mod tests {
         };
         let focus_start = Utc.with_ymd_and_hms(2026, 5, 11, 10, 0, 0).unwrap();
         let focus_end = focus_start + Duration::minutes(30);
+        // Open: without idle detection only the open interval gets the cap at read time.
         db.execute(
-            "INSERT INTO app_intervals(started_at, ended_at, app_id, window_title)
-             VALUES (?1, ?2, 'brave-browser', 'Example')",
-            params![focus_start.to_rfc3339(), focus_end.to_rfc3339()],
+            "INSERT INTO app_intervals(started_at, app_id, window_title)
+             VALUES (?1, 'brave-browser', 'Example')",
+            params![focus_start.to_rfc3339()],
         )
         .unwrap();
 
@@ -6273,53 +6271,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_pause_auto_clears_once_user_active_past_min_break() {
-        let db = Connection::open_in_memory().unwrap();
-        migrate(&db).unwrap();
-        let mut config = Config::default();
-        config.breaks.min_break_secs = 60;
-        let paused_at = Utc::now() - Duration::seconds(120);
-        let info = PauseInfo {
-            at: paused_at,
-            reason: PauseReason::Manual,
-        };
-        persist_pause_state(&db, Some(info)).unwrap();
-        let state = AppState {
-            config: Arc::new(Mutex::new(Arc::new(config))),
-            db: Arc::new(Mutex::new(db)),
-            db_state_path: Arc::new(Mutex::new(default_state_path())),
-            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
-            last_rebuild: Arc::new(Mutex::new(None)),
-            tracking_state: Arc::new(Mutex::new(Some(info))),
-            focus_source_kind: Arc::new("niri".to_string()),
-            notifier: Arc::new(notifications::NullNotifier),
-            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
-        };
-
-        let window = focus::FocusedWindow {
-            window_id: Some(7),
-            app_id: "code".to_string(),
-            title: "src/main.rs".to_string(),
-            pid: None,
-        };
-        handle_focus_change_with(&state, Some(window)).unwrap();
-
-        assert!(
-            state.tracking_state.lock().unwrap().is_none(),
-            "manual pause should auto-clear"
-        );
-        let persisted = {
-            let db = state.db.lock().unwrap();
-            meta_get(&db, "paused_reason").unwrap()
-        };
-        assert!(
-            persisted.is_none(),
-            "persisted pause_reason should be cleared"
-        );
-    }
-
-    #[test]
-    fn manual_pause_does_not_clear_before_min_break() {
+    fn focus_change_does_not_end_manual_pause() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let mut config = Config::default();
@@ -6352,46 +6304,8 @@ mod tests {
 
         assert!(
             state.tracking_state.lock().unwrap().is_some(),
-            "manual pause should persist before min_break"
+            "only the idle resumed event ends a pause"
         );
-    }
-
-    #[test]
-    fn idle_pause_clears_on_focus_activity_without_resumed_event() {
-        let db = Connection::open_in_memory().unwrap();
-        migrate(&db).unwrap();
-        let info = PauseInfo {
-            at: Utc::now() - Duration::seconds(5),
-            reason: PauseReason::Idle,
-        };
-        persist_pause_state(&db, Some(info)).unwrap();
-        let state = AppState {
-            config: Arc::new(Mutex::new(Arc::new(Config::default()))),
-            db: Arc::new(Mutex::new(db)),
-            db_state_path: Arc::new(Mutex::new(default_state_path())),
-            socket_path: Arc::new(Mutex::new(PathBuf::from("/tmp/attn-test.sock"))),
-            last_rebuild: Arc::new(Mutex::new(None)),
-            tracking_state: Arc::new(Mutex::new(Some(info))),
-            focus_source_kind: Arc::new("niri".to_string()),
-            notifier: Arc::new(notifications::NullNotifier),
-            terminal_window_cache: Arc::new(Mutex::new(TerminalWindowCache::new())),
-        };
-
-        let window = focus::FocusedWindow {
-            window_id: Some(7),
-            app_id: "code".to_string(),
-            title: "src/main.rs".to_string(),
-            pid: None,
-        };
-        handle_focus_change_with(&state, Some(window)).unwrap();
-
-        assert!(
-            state.tracking_state.lock().unwrap().is_none(),
-            "idle pause should clear on activity even before min_break"
-        );
-        let db = state.db.lock().unwrap();
-        assert!(meta_get(&db, "paused_reason").unwrap().is_none());
-        assert!(open_app_identity(&db).unwrap().is_some(), "should retrack");
     }
 
     #[test]
@@ -6423,7 +6337,7 @@ mod tests {
         )
         .unwrap();
 
-        let seconds = compute_active_session_seconds(&db, now, 300, 300).unwrap();
+        let (seconds, _) = compute_active_session(&db, now, 300).unwrap();
 
         assert_eq!(seconds, 65 * 60);
     }
