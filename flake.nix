@@ -121,10 +121,11 @@
             daemon.enable = lib.mkEnableOption "attn user daemon";
 
             quickshell.enable = lib.mkEnableOption ''
-              installation of the attn Quickshell indicator component under
-              ~/.config/quickshell/attn/AttnIndicator.qml. If another module
-              manages ~/.config/quickshell as a whole tree, add this component
-              to that source tree instead and leave this option disabled.
+              installation of the attn Quickshell widget (AttnStatus,
+              AttnIndicator, AttnPopup, AttnRow) under ~/.config/quickshell/attn/.
+              If another module manages ~/.config/quickshell as a whole tree,
+              add these files to that source tree instead and leave this
+              option disabled.
             '';
           };
 
@@ -134,9 +135,10 @@
                 assertion = !(cfg.quickshell.enable && (config.xdg.configFile ? "quickshell"));
                 message = ''
                   programs.attn.quickshell.enable cannot install
-                  quickshell/attn/AttnIndicator.qml while xdg.configFile."quickshell"
-                  already manages the whole Quickshell tree. Add AttnIndicator.qml
-                  to that source tree and import it from the bar instead.
+                  quickshell/attn/ while xdg.configFile."quickshell" already
+                  manages the whole Quickshell tree. Add the files from the
+                  repo's quickshell/ to that source tree and import them from
+                  the bar instead.
                 '';
               }
             ];
@@ -145,8 +147,9 @@
 
             xdg.configFile."attn/config.toml".text = cfg.configText;
 
-            xdg.configFile."quickshell/attn/AttnIndicator.qml" = lib.mkIf cfg.quickshell.enable {
-              source = ./quickshell/AttnIndicator.qml;
+            # The four files only work together: AttnStatus feeds the other three.
+            xdg.configFile."quickshell/attn" = lib.mkIf cfg.quickshell.enable {
+              source = ./quickshell;
             };
 
             systemd.user.services.attn = lib.mkIf cfg.daemon.enable {

@@ -10,11 +10,11 @@ Rectangle {
     property int seconds: 0
     property bool watched: false
     property color textColor: "#d4d4dc"
-    property color textDim: "#868690"
-    property color accentColor: "#7c7c88"
-    property color bgSecondary: "#24242c"
-    property color watchedAccent: "#c9b563"
-    property color watchedBg: "#2d2820"
+    property color textDim: Qt.rgba(textColor.r, textColor.g, textColor.b, 0.62)
+    property color washColor: Qt.rgba(1, 1, 1, 0.07)
+    property color borderColor: "#7c7c88"
+    property color attnColor: "#c9b563"
+    property color attnBg: "#2d2820"
     property string fontFamily: "JetBrainsMono Nerd Font"
     property bool animateBar: true
 
@@ -22,7 +22,7 @@ Rectangle {
 
     implicitHeight: 24
     radius: 6
-    color: hoverArea.containsMouse ? Qt.rgba(row.accentColor.r, row.accentColor.g, row.accentColor.b, 0.08) : "transparent"
+    color: hoverArea.containsMouse ? Qt.rgba(washColor.r, washColor.g, washColor.b, Math.min(1, washColor.a + 0.03)) : "transparent"
 
     Behavior on color { ColorAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
@@ -55,54 +55,54 @@ Rectangle {
             Layout.preferredHeight: 18
             Layout.alignment: Qt.AlignVCenter
             radius: 9
-            color: row.watched ? row.watchedBg : row.bgSecondary
+            color: row.watched ? row.attnBg : row.washColor
             border.width: 1
-            border.color: row.watched ? row.watchedAccent : row.accentColor
+            border.color: row.watched ? row.attnColor : row.borderColor
 
             Text {
                 id: rowGlyph
                 anchors.centerIn: parent
                 text: row.icon
-                color: row.watched ? row.watchedAccent : row.textDim
+                color: row.watched ? row.attnColor : row.textDim
                 font.family: row.fontFamily
                 font.pixelSize: 11
             }
         }
 
         Text {
+            Layout.fillWidth: true
             text: row.label
             color: row.watched ? row.textColor : row.textDim
             font.family: row.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: 12
             font.weight: row.watched ? Font.DemiBold : Font.Normal
             elide: Text.ElideRight
-            Layout.fillWidth: true
         }
 
         Rectangle {
             Layout.preferredWidth: 48
             Layout.preferredHeight: 4
             radius: 2
-            color: Qt.darker(row.bgSecondary, 1.15)
+            color: row.washColor
 
             Rectangle {
                 width: Math.max(2, parent.width * row.seconds / Math.max(1, row.maxSeconds))
                 height: parent.height
                 radius: 2
-                color: row.watched ? row.watchedAccent : row.accentColor
+                color: row.watched ? row.attnColor : row.borderColor
                 opacity: row.watched ? 1.0 : 0.55
 
-                Behavior on color { ColorAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutCubic } }
             }
         }
 
         Text {
+            Layout.preferredWidth: 44
+            horizontalAlignment: Text.AlignRight
             text: row.formatDuration(row.seconds)
             color: row.watched ? row.textColor : row.textDim
             font.family: row.fontFamily
             font.pixelSize: 10
-            horizontalAlignment: Text.AlignRight
-            Layout.preferredWidth: 44
         }
     }
 }
