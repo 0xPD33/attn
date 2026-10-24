@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-24
+
 ### Fixed
 - **Idle detection never fired while an app held an idle inhibitor**: the daemon used the Wayland idle notification that waits for every inhibitor. A video tab, a game, or an app that never released a D-Bus inhibit held `idled` back for days. While the notification was live, the 5-minute cap was also off, so unattended nights counted as 7–12 h of focus. In one real ledger there was no idle pause for 6 days. The daemon now uses the input-only notification (ext-idle-notify version 2). On a compositor with version 1 only, `attn doctor` warns.
 - **A video counts without input, but autoplay does not**: when input stops while a tracked video plays, the pause waits until that video's media interval closes. Autoplay closes it and opens a new one, so only the video at the last input counts. A single video counts for at most 3 h after the last input.
@@ -166,7 +168,8 @@ Initial public release.
 - GitHub Releases workflow producing static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 - `attn doctor` probes for niri, state DB, wayland idle-notify, D-Bus login1, browser DBs, and socket path; prints a final `verdict: ok` / `verdict: errors found`.
 
-[Unreleased]: https://github.com/0xPD33/attn/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/0xPD33/attn/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/0xPD33/attn/releases/tag/v0.5.0
 [0.4.0]: https://github.com/0xPD33/attn/releases/tag/v0.4.0
 [0.3.0]: https://github.com/0xPD33/attn/releases/tag/v0.3.0
 [0.2.3]: https://github.com/0xPD33/attn/releases/tag/v0.2.3
