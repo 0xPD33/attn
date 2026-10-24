@@ -53,6 +53,8 @@ impl FocusSource for NiriSource {
                             }
                         }
                     }
+                    // After a read error the child may still run; wait alone would block.
+                    let _ = child.kill();
                     let _ = child.wait();
                     thread::sleep(StdDuration::from_secs(1));
                 }

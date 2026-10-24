@@ -240,10 +240,9 @@ fn csv_field(value: &str) -> String {
     }
 }
 
-fn parse_export_date(value: &str) -> Result<DateTime<Utc>> {
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .with_context(|| format!("invalid date {value:?}, expected YYYY-MM-DD"))?;
-    local_day_start_utc(date)
+fn parse_export_date(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .with_context(|| format!("invalid date {value:?}, expected YYYY-MM-DD"))
 }
 
 /// Dump the raw interval ledger to CSV on stdout, attributing each row to its watch
@@ -254,11 +253,12 @@ fn run_export(since: Option<&str>, until: Option<&str>) -> Result<()> {
     let db = open_state_db(&config.state_path)?;
     let now = Utc::now();
 
-    let lo = since.map(parse_export_date).transpose()?;
+    let lo = since
+        .map(|v| parse_export_date(v).and_then(local_day_start_utc))
+        .transpose()?;
     let hi = until
-        .map(parse_export_date)
-        .transpose()?
-        .map(|d| d + Duration::days(1));
+        .map(|v| parse_export_date(v).and_then(|d| local_day_start_utc(d + Duration::days(1))))
+        .transpose()?;
     let in_range =
         |start: DateTime<Utc>| lo.is_none_or(|l| start >= l) && hi.is_none_or(|h| start < h);
 
@@ -1026,11 +1026,21 @@ fn run_daemon() -> Result<()> {
     });
 
     let import_state = state.clone();
+    let mut last_import_day = None;
     thread::spawn(move || loop {
         let start = Instant::now();
-        if let Err(error) = import_domains_for_today(&import_state) {
-            eprintln!("attn browser import error: {error:#}");
+        let day = Local::now().date_naive();
+        // The last poll before midnight ran up to poll_interval_secs early: finish that day.
+        let days = last_import_day
+            .filter(|last| *last != day)
+            .into_iter()
+            .chain([day]);
+        for import_day in days {
+            if let Err(error) = import_domains_for_day(&import_state, import_day) {
+                eprintln!("attn browser import error: {error:#}");
+            }
         }
+        last_import_day = Some(day);
         let poll_secs = import_state
             .config
             .lock()
@@ -1178,8 +1188,15 @@ impl IdleClient {
         let (Some(seat), Some(notifier)) = (self.seat.as_ref(), self.notifier.as_ref()) else {
             return;
         };
-        self.notification = Some(notifier.get_idle_notification(self.timeout_ms, seat, qh, ()));
+        // An idle inhibitor (a video tab, a game, a leaked D-Bus inhibit) holds the plain
+        // notification back for hours. The version 2 input-only one ignores inhibitors.
+        self.notification = Some(if wayland_client::Proxy::version(notifier) >= 2 {
+            notifier.get_input_idle_notification(self.timeout_ms, seat, qh, ())
+        } else {
+            notifier.get_idle_notification(self.timeout_ms, seat, qh, ())
+        });
         IDLE_DETECTION.store(true, Ordering::Relaxed);
+        *DEFERRED_IDLE.lock().unwrap() = None;
         // A new notification sends `resumed` only after its own `idled`, so an idle pause
         // from the old one would never clear. Resume now; the next `idled` trims the time.
         let idle_paused = self
@@ -1202,27 +1219,85 @@ impl IdleClient {
         if current.is_some() {
             return;
         }
-        let info = PauseInfo {
-            at: idle_since,
-            reason: PauseReason::Idle,
-        };
         let db = self.state.db.lock().unwrap();
-        if let Err(e) = end_focus_at(&db, idle_since) {
-            eprintln!("attn idle: close interval failed: {e:#}");
+        // A tracked video is watched without input. The media loop pauses once it ends.
+        match open_media_interval_id(&db) {
+            Ok(Some(media_id)) => {
+                eprintln!("attn idle: no input, deferred while media interval {media_id} plays");
+                *DEFERRED_IDLE.lock().unwrap() = Some(DeferredIdle {
+                    media_id,
+                    idle_since,
+                });
+            }
+            Ok(None) => pause_for_idle(&db, &mut current, idle_since),
+            Err(e) => {
+                eprintln!("attn idle: read media state failed: {e:#}");
+                pause_for_idle(&db, &mut current, idle_since);
+            }
         }
-        if let Err(e) = persist_pause_state(&db, Some(info)) {
-            eprintln!("attn idle: persist pause failed: {e:#}");
-        }
-        *current = Some(info);
     }
 
     /// Input after at least `timeout_ms` without any. That is a break, so it ends a manual
     /// pause too: "Take one" resumes once the user is back.
     fn on_resumed(&self) {
+        *DEFERRED_IDLE.lock().unwrap() = None;
         if let Err(e) = clear_pause(&self.state) {
             eprintln!("attn idle: resume failed: {e:#}");
         }
     }
+}
+
+/// End focus at `at` and persist an idle pause. The caller holds the pause guard.
+fn pause_for_idle(db: &Connection, current: &mut Option<PauseInfo>, at: DateTime<Utc>) {
+    let info = PauseInfo {
+        at,
+        reason: PauseReason::Idle,
+    };
+    if let Err(e) = end_focus_at(db, at) {
+        eprintln!("attn idle: close interval failed: {e:#}");
+    }
+    if let Err(e) = persist_pause_state(db, Some(info)) {
+        eprintln!("attn idle: persist pause failed: {e:#}");
+    }
+    *current = Some(info);
+}
+
+/// Apply a deferred idle once its media interval ends, or at the cap. Autoplay closes the
+/// interval and opens a new one, so only the video playing at the last input counts.
+fn apply_deferred_idle(state: &AppState) -> Result<()> {
+    if DEFERRED_IDLE.lock().unwrap().is_none() {
+        return Ok(());
+    }
+    let mut current = state.tracking_state.lock().unwrap();
+    let db = state.db.lock().unwrap();
+    let mut slot = DEFERRED_IDLE.lock().unwrap();
+    let Some(deferred) = *slot else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    let cap = deferred.idle_since + Duration::seconds(MAX_UNATTENDED_VIDEO_SECS);
+    let ended: Option<Option<String>> = db
+        .query_row(
+            "SELECT ended_at FROM media_intervals WHERE id = ?1",
+            params![deferred.media_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let end = match ended {
+        Some(None) if now < cap => return Ok(()),
+        Some(None) => cap,
+        Some(Some(ended)) => parse_rfc3339_utc(&ended)?.min(cap),
+        None => deferred.idle_since,
+    };
+    *slot = None;
+    if current.is_none() {
+        eprintln!(
+            "attn idle: media interval {} ended, pausing",
+            deferred.media_id
+        );
+        pause_for_idle(&db, &mut current, end.max(deferred.idle_since));
+    }
+    Ok(())
 }
 
 impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry, ()>
@@ -1375,7 +1450,9 @@ fn sync_mpris_media_once(state: &AppState, conn: &zbus::blocking::Connection) ->
             should_track_media_snapshot(&snapshot, &config, open.as_ref()).then_some(snapshot)
         })
         .collect::<Vec<_>>();
-    sync_media_snapshots(&db, Utc::now(), &snapshots)
+    sync_media_snapshots(&db, Utc::now(), &snapshots)?;
+    drop(db);
+    apply_deferred_idle(state)
 }
 
 fn collect_mpris_snapshots(conn: &zbus::blocking::Connection) -> Result<Vec<MediaSnapshot>> {
@@ -1477,11 +1554,19 @@ fn domain_from_media_url(raw_url: &str) -> Option<String> {
 
 fn run_config_watcher(state: AppState) {
     let path = expand_path(DEFAULT_CONFIG_PATH);
-    let mut last_mtime: Option<std::time::SystemTime> =
-        fs::metadata(&path).and_then(|m| m.modified()).ok();
+    // A home-manager config is a symlink into the Nix store, where every file has mtime 1.
+    // A switch replaces the link, so its own mtime is the one that moves.
+    let mtimes = || {
+        let target = fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+        let link = fs::symlink_metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()?;
+        Some((target, link))
+    };
+    let mut last_mtime = mtimes();
     loop {
         thread::sleep(StdDuration::from_secs(3));
-        let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mtime = mtimes();
         if mtime != last_mtime {
             last_mtime = mtime;
             if mtime.is_none() {
@@ -2230,25 +2315,31 @@ fn set_pause(state: &AppState, reason: PauseReason) -> Result<PauseResponse> {
 }
 
 fn clear_pause(state: &AppState) -> Result<PauseResponse> {
+    let not_paused = PauseResponse {
+        ok: true,
+        paused: false,
+        paused_reason: None,
+    };
+    if state.tracking_state.lock().unwrap().is_none() {
+        return Ok(not_paused);
+    }
+    // Query and resolve before taking locks: both run subprocesses (`niri msg`, tmux).
+    let config = state.config.lock().unwrap().clone();
+    let window = query_focused_window(state)
+        .ok()
+        .flatten()
+        .map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
     let mut current = state.tracking_state.lock().unwrap();
     if current.is_none() {
-        return Ok(PauseResponse {
-            ok: true,
-            paused: false,
-            paused_reason: None,
-        });
+        return Ok(not_paused);
     }
     let now = Utc::now();
     let db = state.db.lock().unwrap();
     persist_pause_state(&db, None)?;
     meta_set(&db, "session_reset_at", &now.to_rfc3339())?;
     *current = None;
-    drop(db);
-    if let Ok(Some(window)) = query_focused_window(state) {
-        let config = state.config.lock().unwrap().clone();
-        let resolved = resolve_focused_window(window, &config, &state.terminal_window_cache);
-        let db = state.db.lock().unwrap();
-        open_app_interval(&db, now, &resolved)?;
+    if let Some(window) = window {
+        open_app_interval(&db, now, &window)?;
     }
     Ok(PauseResponse {
         ok: true,
@@ -2266,10 +2357,7 @@ fn reload_daemon_config(state: &AppState) -> Result<ReloadResponse> {
     if state_reopened {
         let now = Utc::now();
         swap_state_db_for_reload(state, &old_config, &new_config, now)?;
-        if let Ok(Some(window)) = query_focused_window(state) {
-            let db = state.db.lock().unwrap();
-            open_app_interval(&db, Utc::now(), &window)?;
-        }
+        handle_focus_change_with(state, query_focused_window(state).ok().flatten())?;
     }
 
     {
@@ -2310,14 +2398,7 @@ fn run_focus_dispatch(state: AppState) -> Result<()> {
     eprintln!("attn focus source: {}", source.name());
 
     // Open an interval for the current window at startup.
-    let paused = state.tracking_state.lock().unwrap().is_some();
-    if !paused {
-        if let Some(window) = source.poll_current()? {
-            let config = state.config.lock().unwrap().clone();
-            let resolved = resolve_focused_window(window, &config, &state.terminal_window_cache);
-            open_app_interval(&state.db.lock().unwrap(), Utc::now(), &resolved)?;
-        }
-    }
+    handle_focus_change_with(&state, source.poll_current()?)?;
 
     let (tx, rx) = std::sync::mpsc::channel::<focus::FocusEvent>();
 
@@ -2346,22 +2427,24 @@ fn handle_focus_change_with(
 ) -> Result<()> {
     let now = Utc::now();
     let config = state.config.lock().unwrap().clone();
+    // Resolve before taking locks: it can run tmux.
+    let current =
+        current_window.map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
 
     // Only the idle notification's `resumed` ends a pause: a focus event or the terminal
     // poll can fire while the user is away, such as a terminal title that keeps changing.
-    let paused = state.tracking_state.lock().unwrap().is_some();
+    // Hold the pause guard across the write, or an idle pause can land in between.
+    let paused = state.tracking_state.lock().unwrap();
     let db = state.db.lock().unwrap();
     let open = open_app_identity(&db)?;
 
-    if paused {
+    if paused.is_some() {
         if open.is_some() {
             close_open_interval(&db, now, config.idle_after_secs)?;
         }
         return Ok(());
     }
 
-    let current =
-        current_window.map(|w| resolve_focused_window(w, &config, &state.terminal_window_cache));
     match (open, current) {
         (Some(open), Some(window)) if open.matches(&window) => {}
         (Some(_), Some(window)) => {
@@ -2446,7 +2529,6 @@ impl TerminalWindowCache {
         self.map.insert(window_id, name);
     }
 
-    #[allow(dead_code)]
     fn invalidate(&mut self, window_id: i64) {
         if self.map.remove(&window_id).is_some() {
             self.order.retain(|id| *id != window_id);
@@ -2473,11 +2555,22 @@ fn resolve_focused_window(
         return window;
     }
 
-    // Cache lookup for ambiguous titles.
+    let descendants = window.pid.map(collect_proc_descendants).unwrap_or_default();
+
+    // Cache lookup for ambiguous titles. The name holds only while that program still runs.
+    // ponytail: with a shared terminal process, "still runs" means in any of its windows.
     if let Some(wid) = window.window_id {
-        if let Some(cached) = cache.lock().unwrap().get(wid).map(|s| s.to_owned()) {
-            window.app_id = cached;
-            return window;
+        let cached = cache.lock().unwrap().get(wid).map(|s| s.to_owned());
+        if let Some(cached) = cached {
+            let alive = window.pid.is_none()
+                || descendants.iter().any(|d| {
+                    config.terminal_subprocess_program(&d.name).as_deref() == Some(&cached)
+                });
+            if alive {
+                window.app_id = cached;
+                return window;
+            }
+            cache.lock().unwrap().invalidate(wid);
         }
     }
 
@@ -2485,10 +2578,18 @@ fn resolve_focused_window(
     let Some(pid) = window.pid else {
         return window;
     };
-    let descendants = collect_proc_descendants(pid);
+    // One process can serve several windows (Ghostty, kitty --single-instance). Its
+    // descendants then span all of them, so only a tmux title still names a client.
+    let shared = read_proc_children(pid).len() > 1;
+    if shared && !window.title.starts_with("tmux ") {
+        return window;
+    }
     let descendant_pids: HashSet<i32> = descendants.iter().map(|d| d.pid).collect();
     if let Some(name) = pick_tmux_subprocess(&descendant_pids, config) {
         window.app_id = name;
+        return window;
+    }
+    if shared {
         return window;
     }
     if let Some(name) = pick_terminal_subprocess(&descendants, config) {
@@ -2501,15 +2602,11 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
     if descendant_pids.is_empty() {
         return None;
     }
-    let output = Command::new("tmux")
-        .args([
-            "list-clients",
-            "-F",
-            "#{client_pid}|#{client_session}|#{client_activity}",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = output_with_timeout(Command::new("tmux").args([
+        "list-clients",
+        "-F",
+        "#{client_pid}|#{client_session}|#{client_activity}",
+    ]))?;
     if !output.status.success() {
         return None;
     }
@@ -2529,17 +2626,15 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
         }
         let session = parts[1];
         let activity: u64 = parts[2].parse().unwrap_or(0);
-        let cmd_output = Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                session,
-                "#{pane_current_command}",
-            ])
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
+        let Some(cmd_output) = output_with_timeout(Command::new("tmux").args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{pane_current_command}",
+        ])) else {
+            continue;
+        };
         if !cmd_output.status.success() {
             continue;
         }
@@ -2559,10 +2654,33 @@ fn pick_tmux_subprocess(descendant_pids: &HashSet<i32>, config: &Config) -> Opti
     best.map(|(_, name)| name)
 }
 
+const TMUX_TIMEOUT: StdDuration = StdDuration::from_secs(1);
+
+/// `Command::output` with a deadline: a hung tmux server must not stall focus tracking.
+fn output_with_timeout(cmd: &mut Command) -> Option<std::process::Output> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + TMUX_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(StdDuration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Braille spinner chars used by Claude Code, plus common status markers.
-/// U+2800..U+28FF (braille), ✳ U+2733, ⏵ U+23F5, ✶ U+2736.
+/// U+2800..U+28FF (braille), ✳ U+2733, ⏵ U+23F5, ✶ U+2736, ◐◑◒◓ U+25D0..U+25D3.
 const CLAUDE_TITLE_MARKERS: &[char] = &[
-    '✳', '⏵', '✶', // Braille spinners
+    '✳', '⏵', '✶', '◐', '◑', '◒', '◓', // Braille spinners
     '⠂', '⠐', '⠏', '⠦', '⠹', '⠼', '⠴', '⠧', '⠇', '⠋', '⠙', '⠸', '⠨', '⢿', '⣷', '⣯', '⣟', '⡿', '⣻',
     '⣽', '⣾',
 ];
@@ -3105,6 +3223,16 @@ fn open_media_interval(db: &Connection, playback_id: &str) -> Result<Option<Open
     .map_err(Into::into)
 }
 
+fn open_media_interval_id(db: &Connection) -> Result<Option<i64>> {
+    db.query_row(
+        "SELECT id FROM media_intervals WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn close_open_media_intervals(db: &Connection, now: DateTime<Utc>) -> Result<()> {
     let mut stmt =
         db.prepare("SELECT id, started_at FROM media_intervals WHERE ended_at IS NULL")?;
@@ -3318,14 +3446,15 @@ fn compute_focus_metrics(
     let mut stmt = db.prepare(
         "SELECT started_at, ended_at, app_id
          FROM app_intervals
-         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3
+         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3 AND started_at >= ?4
          ORDER BY started_at ASC",
     )?;
     let rows = stmt.query_map(
         params![
             end.to_rfc3339(),
             effective_now.to_rfc3339(),
-            start.to_rfc3339()
+            start.to_rfc3339(),
+            lookback(start)
         ],
         |row| {
             Ok((
@@ -3364,16 +3493,19 @@ fn compute_focus_metrics(
     let mut stmt = db.prepare(
         "SELECT started_at, ended_at, domain
          FROM domain_intervals
-         WHERE started_at < ?1 AND ended_at > ?2
+         WHERE started_at < ?1 AND ended_at > ?2 AND started_at >= ?3
          ORDER BY started_at ASC",
     )?;
-    let rows = stmt.query_map(params![end.to_rfc3339(), start.to_rfc3339()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        params![end.to_rfc3339(), start.to_rfc3339(), lookback(start)],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
     for row in rows {
         let (started_at, ended_at, domain) = row?;
         if !is_distraction_category(config.category_for_domain(&domain).as_deref()) {
@@ -3446,7 +3578,13 @@ fn build_status(db: &Connection, config: &Config, rebuild: bool) -> Result<Statu
     let browser_ids = config.browser_app_ids();
 
     let day_start = local_day_start_utc(day)?;
-    let focus = compute_focus_metrics(db, config, day_start, day_start + Duration::days(1), now)?;
+    let focus = compute_focus_metrics(
+        db,
+        config,
+        day_start,
+        local_day_start_utc(day + Duration::days(1))?,
+        now,
+    )?;
 
     let apps = load_app_status(db, &day_string)?;
     let domains = load_domain_status(db, &day_string, &config.display)?;
@@ -3822,7 +3960,7 @@ fn rebuild_one_day(
 ) -> Result<()> {
     let day_string = day.to_string();
     let start = local_day_start_utc(day)?;
-    let end = start + Duration::days(1);
+    let end = local_day_start_utc(day + Duration::days(1))?;
     let effective_now = now.min(end);
     rebuild_daily_totals_inner(db, config, &day_string, start, end, effective_now)
 }
@@ -3848,13 +3986,14 @@ fn rebuild_daily_totals_inner(
     let mut stmt = db.prepare(
         "SELECT started_at, ended_at, app_id
          FROM app_intervals
-         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3",
+         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3 AND started_at >= ?4",
     )?;
     let rows = stmt.query_map(
         params![
             end.to_rfc3339(),
             effective_now.to_rfc3339(),
-            start.to_rfc3339()
+            start.to_rfc3339(),
+            lookback(start)
         ],
         |row| {
             Ok((
@@ -3895,15 +4034,18 @@ fn rebuild_daily_totals_inner(
     let mut stmt = db.prepare(
         "SELECT started_at, ended_at, domain
          FROM domain_intervals
-         WHERE started_at < ?1 AND ended_at > ?2",
+         WHERE started_at < ?1 AND ended_at > ?2 AND started_at >= ?3",
     )?;
-    let rows = stmt.query_map(params![end.to_rfc3339(), start.to_rfc3339()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        params![end.to_rfc3339(), start.to_rfc3339(), lookback(start)],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
     for row in rows {
         let (started_at, ended_at, domain) = row?;
         let interval_start = parse_rfc3339_utc(&started_at)?.max(start);
@@ -4003,7 +4145,7 @@ fn load_media_status(
     now: DateTime<Utc>,
 ) -> Result<Vec<MediaStatus>> {
     let start = local_day_start_utc(day)?;
-    let end = start + Duration::days(1);
+    let end = local_day_start_utc(day + Duration::days(1))?;
     let effective_end = if day == Local::now().date_naive() {
         now.min(end).max(start)
     } else {
@@ -4012,13 +4154,14 @@ fn load_media_status(
     let mut stmt = db.prepare(
         "SELECT started_at, ended_at, player_name, title, artist, url, domain
          FROM media_intervals
-         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3",
+         WHERE started_at < ?1 AND COALESCE(ended_at, ?2) > ?3 AND started_at >= ?4",
     )?;
     let rows = stmt.query_map(
         params![
             end.to_rfc3339(),
             effective_end.to_rfc3339(),
-            start.to_rfc3339()
+            start.to_rfc3339(),
+            lookback(start)
         ],
         |row| {
             Ok((
@@ -4113,9 +4256,8 @@ fn media_label(
     player_name.to_string()
 }
 
-fn import_domains_for_today(state: &AppState) -> Result<()> {
+fn import_domains_for_day(state: &AppState, day: NaiveDate) -> Result<()> {
     let config = state.config.lock().unwrap().clone();
-    let day = Local::now().date_naive();
     let imports = collect_browser_imports_for_day(&config, day)?;
     write_collected_domain_imports(state, &config, day, &imports).map(|_| ())
 }
@@ -4145,7 +4287,7 @@ struct BrowserImport {
 
 fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Vec<BrowserImport>> {
     let start = local_day_start_utc(day)?;
-    let end = import_window_end(day, start);
+    let end = import_window_end(day, start, local_day_start_utc(day + Duration::days(1))?);
     let mut imports = Vec::new();
 
     for (name, browser) in &config.browsers {
@@ -4200,6 +4342,9 @@ fn collect_browser_imports_for_day(config: &Config, day: NaiveDate) -> Result<Ve
         if !successful_profiles.is_empty() {
             successful_profiles.sort();
             successful_profiles.dedup();
+            // Normalize again across profiles: one profile's last visit runs to the window
+            // end and would otherwise claim the time of the other profile's later visits.
+            let visits = browsers::normalize_visit_ranges(visits, start, end);
             imports.push(BrowserImport {
                 name: name.clone(),
                 browser: browser.clone(),
@@ -4219,8 +4364,8 @@ fn write_domain_imports_for_day(
     imports: &[BrowserImport],
 ) -> Result<()> {
     let start = local_day_start_utc(day)?;
-    let end = start + Duration::days(1);
-    let effective_end = import_window_end(day, start);
+    let end = local_day_start_utc(day + Duration::days(1))?;
+    let effective_end = import_window_end(day, start, end);
 
     db.execute_batch("BEGIN IMMEDIATE;")?;
     let result = (|| -> Result<()> {
@@ -4250,8 +4395,7 @@ fn write_domain_imports_for_day(
     result
 }
 
-fn import_window_end(day: NaiveDate, start: DateTime<Utc>) -> DateTime<Utc> {
-    let end = start + Duration::days(1);
+fn import_window_end(day: NaiveDate, start: DateTime<Utc>, end: DateTime<Utc>) -> DateTime<Utc> {
     if day == Local::now().date_naive() {
         Utc::now().min(end).max(start)
     } else {
@@ -4266,17 +4410,28 @@ fn delete_imported_domain_intervals(
     end: DateTime<Utc>,
 ) -> Result<()> {
     for source_profile in &import.successful_profiles {
+        // Rewrite only from the profile's earliest visit still on disk, so a cleared or
+        // recreated history cannot erase time that is already attributed.
+        let Some(from) = import
+            .visits
+            .iter()
+            .filter(|visit| &visit.source_profile == source_profile)
+            .map(|visit| visit.started_at.max(start))
+            .min()
+        else {
+            continue;
+        };
         db.execute(
             "DELETE FROM domain_intervals
              WHERE browser_name = ?1
                AND source_profile = ?2
                AND started_at < ?3
-               AND ended_at > ?4",
+               AND started_at >= ?4",
             params![
                 import.name,
                 source_profile,
                 end.to_rfc3339(),
-                start.to_rfc3339()
+                from.to_rfc3339()
             ],
         )?;
         for app_id in &import.browser.app_ids {
@@ -4286,8 +4441,8 @@ fn delete_imported_domain_intervals(
                    AND browser_app_id = ?1
                    AND source_profile = ?2
                    AND started_at < ?3
-                   AND ended_at > ?4",
-                params![app_id, source_profile, end.to_rfc3339(), start.to_rfc3339()],
+                   AND started_at >= ?4",
+                params![app_id, source_profile, end.to_rfc3339(), from.to_rfc3339()],
             )?;
         }
     }
@@ -4315,8 +4470,7 @@ fn discover_history_paths(browser: &BrowserConfig) -> Result<Vec<PathBuf>> {
 }
 
 fn cleanup_stale_snapshots() {
-    let temp_dir = env::temp_dir();
-    let entries = match fs::read_dir(&temp_dir) {
+    let entries = match fs::read_dir(snapshot_dir()) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -4352,8 +4506,15 @@ unsafe fn libc_getuid() -> u32 {
     getuid()
 }
 
+/// History snapshots go to the runtime tmpfs: a copy every poll must not churn a disk.
+fn snapshot_dir() -> PathBuf {
+    env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+}
+
 fn snapshot_history(history_path: &Path, browser_name: &str) -> Result<PathBuf> {
-    let mut path = env::temp_dir();
+    let mut path = snapshot_dir();
     let unique = format!(
         "attn-{browser_name}-{}-{}.sqlite",
         std::process::id(),
@@ -4368,6 +4529,8 @@ fn snapshot_history(history_path: &Path, browser_name: &str) -> Result<PathBuf> 
             )
         })?;
         harden_file_permissions(&path)?;
+        // Chromium uses a rollback journal, so a copy taken mid-commit needs it to roll back.
+        copy_sqlite_sidecar(history_path, &path, "-journal")?;
         copy_sqlite_sidecar(history_path, &path, "-wal")?;
         copy_sqlite_sidecar(history_path, &path, "-shm")
     })();
@@ -4397,6 +4560,7 @@ fn remove_snapshot_files(snapshot: &Path) {
     let _ = fs::remove_file(snapshot);
     let _ = fs::remove_file(sqlite_sidecar_path(snapshot, "-wal"));
     let _ = fs::remove_file(sqlite_sidecar_path(snapshot, "-shm"));
+    let _ = fs::remove_file(sqlite_sidecar_path(snapshot, "-journal"));
 }
 
 fn source_profile_from_history_path(history_path: &Path) -> String {
@@ -4434,7 +4598,8 @@ fn insert_attributed_domain_intervals(
          FROM app_intervals
          WHERE app_id IN ({placeholders})
            AND started_at < ?
-           AND COALESCE(ended_at, ?) > ?"
+           AND COALESCE(ended_at, ?) > ?
+           AND started_at >= ?"
     );
 
     let mut values: Vec<&dyn rusqlite::ToSql> = Vec::new();
@@ -4444,9 +4609,11 @@ fn insert_attributed_domain_intervals(
     let visit_end = visit.ended_at.to_rfc3339();
     let visit_start = visit.started_at.to_rfc3339();
     let window_end_text = window_end.to_rfc3339();
+    let lower = lookback(visit.started_at);
     values.push(&visit_end);
     values.push(&window_end_text);
     values.push(&visit_start);
+    values.push(&lower);
 
     let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map(values.as_slice(), |row| {
@@ -4636,13 +4803,15 @@ fn uncovered_domain_segments(
          WHERE browser_app_id = ?1
            AND started_at < ?2
            AND ended_at > ?3
+           AND started_at >= ?4
          ORDER BY started_at ASC",
     )?;
     let rows = stmt.query_map(
         params![
             browser_app_id,
             ended_at.to_rfc3339(),
-            started_at.to_rfc3339()
+            started_at.to_rfc3339(),
+            lookback(started_at)
         ],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?;
@@ -4748,8 +4917,15 @@ fn run_doctor() -> Result<()> {
     }
 
     match probe_wayland_idle() {
-        Ok(true) => println!("wayland idle-notify: ok"),
-        Ok(false) => {
+        Ok(Some(version)) if version >= 2 => println!("wayland idle-notify: ok (input idle)"),
+        Ok(Some(_)) => {
+            println!("wayland idle-notify: ok (v1 only)");
+            warnings.push(
+                "idle inhibitors (video, games) hold idle back; away time can count as focus"
+                    .into(),
+            );
+        }
+        Ok(None) => {
             println!("wayland idle-notify: unavailable (compositor missing ext_idle_notifier_v1)");
             warnings.push(
                 "auto-pause on idle disabled; manual break-start/break-end still work".into(),
@@ -4850,7 +5026,7 @@ fn run_doctor() -> Result<()> {
     }
 }
 
-fn probe_wayland_idle() -> Result<bool> {
+fn probe_wayland_idle() -> Result<Option<u32>> {
     use wayland_client::Connection as WConnection;
     let conn = match WConnection::connect_to_env() {
         Ok(c) => c,
@@ -4860,14 +5036,14 @@ fn probe_wayland_idle() -> Result<bool> {
     let qh = event_queue.handle();
     let display = conn.display();
     display.get_registry(&qh, ());
-    let mut probe = DoctorIdleProbe { found: false };
+    let mut probe = DoctorIdleProbe { version: None };
     event_queue.roundtrip(&mut probe).ok();
     event_queue.roundtrip(&mut probe).ok();
-    Ok(probe.found)
+    Ok(probe.version)
 }
 
 struct DoctorIdleProbe {
-    found: bool,
+    version: Option<u32>,
 }
 
 impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry, ()>
@@ -4881,9 +5057,12 @@ impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry,
         _conn: &wayland_client::Connection,
         _qh: &wayland_client::QueueHandle<Self>,
     ) {
-        if let wayland_client::protocol::wl_registry::Event::Global { interface, .. } = event {
+        if let wayland_client::protocol::wl_registry::Event::Global {
+            interface, version, ..
+        } = event
+        {
             if interface == "ext_idle_notifier_v1" {
-                probe.found = true;
+                probe.version = Some(version);
             }
         }
     }
@@ -4951,6 +5130,15 @@ fn local_day_start_utc(day: NaiveDate) -> Result<DateTime<Utc>> {
     Ok(local.with_timezone(&Utc))
 }
 
+// ponytail: interval queries look back one day for rows that started earlier and still
+// overlap. The longest stored interval so far is 12 h; a longer one would drop out.
+const INTERVAL_LOOKBACK_SECS: i64 = 86_400;
+
+/// Lower `started_at` bound for an overlap query at `at`, so it uses the index.
+fn lookback(at: DateTime<Utc>) -> String {
+    (at - Duration::seconds(INTERVAL_LOOKBACK_SECS)).to_rfc3339()
+}
+
 fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
@@ -4959,10 +5147,23 @@ fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
 /// interval at the last input, so the `idle_after_secs` cap would only cut real focus.
 static IDLE_DETECTION: AtomicBool = AtomicBool::new(false);
 
+/// Input went idle while a tracked video played. Lock order: after `tracking_state` and `db`.
+static DEFERRED_IDLE: Mutex<Option<DeferredIdle>> = Mutex::new(None);
+
+// ponytail: fixed ceiling for a single long video (livestream, loop) watched without
+// input; promote to [breaks] config if 3 h ever feels wrong.
+const MAX_UNATTENDED_VIDEO_SECS: i64 = 3 * 3600;
+
+#[derive(Clone, Copy, Debug)]
+struct DeferredIdle {
+    media_id: i64,
+    idle_since: DateTime<Utc>,
+}
+
 /// A closed interval keeps its stored end. The open one runs to `fallback_end`, capped at
 /// `idle_after_secs` while no idle signal can close it.
-// ponytail: an idle inhibitor (a game or video left running) keeps the open interval
-// growing; add an input-only notification (ext-idle-notify v2) if that shows up in data.
+// ponytail: on a compositor with only ext-idle-notify v1, an idle inhibitor still keeps the
+// open interval growing; `attn doctor` warns about it.
 fn capped_interval_end(
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
@@ -5878,7 +6079,13 @@ mod tests {
             name: "brave".to_string(),
             browser,
             successful_profiles: vec!["Default".to_string()],
-            visits: Vec::new(),
+            visits: vec![BrowserVisit {
+                started_at: focus_start,
+                ended_at: focus_end,
+                url: "https://new.example/".to_string(),
+                domain: "new.example".to_string(),
+                source_profile: "Default".to_string(),
+            }],
         }];
 
         write_domain_imports_for_day(
@@ -5927,7 +6134,13 @@ mod tests {
             name: "brave".to_string(),
             browser,
             successful_profiles: vec!["Default".to_string()],
-            visits: Vec::new(),
+            visits: vec![BrowserVisit {
+                started_at: focus_start,
+                ended_at: focus_end,
+                url: "https://new.example/".to_string(),
+                domain: "new.example".to_string(),
+                source_profile: "Default".to_string(),
+            }],
         }];
 
         write_domain_imports_for_day(

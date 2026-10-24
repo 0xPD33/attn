@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+- **Idle detection never fired while an app held an idle inhibitor**: the daemon used the Wayland idle notification that waits for every inhibitor. A video tab, a game, or an app that never released a D-Bus inhibit held `idled` back for days. While the notification was live, the 5-minute cap was also off, so unattended nights counted as 7–12 h of focus. In one real ledger there was no idle pause for 6 days. The daemon now uses the input-only notification (ext-idle-notify version 2). On a compositor with version 1 only, `attn doctor` warns.
+- **A video counts without input, but autoplay does not**: when input stops while a tracked video plays, the pause waits until that video's media interval closes. Autoplay closes it and opens a new one, so only the video at the last input counts. A single video counts for at most 3 h after the last input.
+- **The browser import scanned the whole ledger every minute**: each visit ran an overlap query with no lower time bound. On a 9-day ledger one poll took about 16.8 s, under the DB lock. The import thread used 9.1 of the daemon's 11.4 CPU hours, and the widget's status request hit its 5 s timeout once a minute ("Broken pipe" in the log). All interval overlap queries now have a lower bound one day before the window.
+- **Every Ghostty window counted as the newest program in any of them**: Ghostty runs all windows in one process, so the `/proc` walk saw the programs of every window. In 9.5 days the ledger had 0 h of Ghostty and 107 h of `claude`. When the terminal process has more than one child, the walk is skipped, and only the title or a `tmux ` title decides.
+- **A terminal stayed "claude" after claude exited**: the per-window cache kept a title match for the life of the window. A cached name now holds only while that program still runs. The `◐◑◒◓` spinner glyphs of Claude Code now count as title markers.
+- **A day with a clock change lost or doubled an hour**: day windows ended 24 h after local midnight. On a 25-hour day the last hour was in no day, and on a 23-hour day the first hour of the next day counted twice. Day windows now end at the next local midnight. `attn export --until` had the same bug.
+- **Time went to the wrong Brave profile**: the import normalized each profile on its own, so one profile's last visit ran to the window end and took the time of the other profile's later visits. The visits of all profiles are now normalized together.
+- **A cleared or recreated history erased attributed time**: each import deleted the whole day for every profile that it read. The delete now starts at the profile's earliest visit still in the history.
+- **The last minutes before midnight were never imported**: the import ran only for today. The first poll after midnight now also finishes the previous day.
+- **History snapshots wrote to the root disk every minute**: they went to `/tmp`, even with the disk 98% full. They now go to `$XDG_RUNTIME_DIR`. The snapshot now also copies Chromium's `-journal` sidecar, so a copy taken during a commit can roll back.
+- **Config auto-reload never fired for a home-manager config**: the watcher read the mtime of the symlink target, and every Nix store file has mtime 1. It now also compares the mtime of the link.
+- **A focus event could open an interval during an idle pause**: the focus handler checked the pause, released the lock, and then wrote. It now holds the pause lock across the write. A state DB swap on reload now resolves the terminal and checks the pause too.
+- **A hung tmux server could freeze all tracking**: tmux and `niri msg` ran while the daemon held the DB or pause lock. The window is now resolved before the daemon takes a lock, and each tmux call has a 1 s timeout.
+- **The niri adapter could block after a read error**: it waited for the event-stream child without stopping it. It now kills the child first.
+
 ## [0.4.0] - 2026-10-14
 
 ### Added

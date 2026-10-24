@@ -18,7 +18,7 @@ A local attention ledger for Wayland ([niri](https://github.com/YaLTeR/niri), [H
 - **Browser domain time** for the Chromium family (Helium, Brave, Chrome, Chromium) and the Firefox family (Firefox, Zen, LibreWolf, Floorp). Domain time only grows while that browser holds focus.
 - **Video playback** through MPRIS, so a two-hour film counts as two hours instead of one navigation event. It counts only while the playing browser has focus and the tab sits on a known video domain.
 - **Focus metrics**: context switches, longest unbroken stretch, 25-minute deep-work blocks, the day's work window.
-- **Idle detection.** Wayland idle-notify ends focus at your last input after `breaks.min_break_secs` without any, so an unattended tab cannot inflate the day. Where the compositor has no idle signal, an interval stops counting after `idle_after_secs` (5 minutes).
+- **Idle detection.** Wayland idle-notify ends focus at your last input after `breaks.min_break_secs` without any, so an unattended tab cannot inflate the day. attn uses the input-only notification, so an idle inhibitor (a video tab, a game) cannot hide your absence. A focused video keeps counting until it ends, for at most 3 hours, and autoplay does not extend it. Where the compositor has no idle signal, an interval stops counting after `idle_after_secs` (5 minutes).
 
 ## What it does not do
 

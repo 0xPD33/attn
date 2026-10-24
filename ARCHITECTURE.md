@@ -37,8 +37,8 @@ Threads:
 - **Heartbeat** (30 s): writes `meta.last_heartbeat_at`. On startup, if last heartbeat is `>60 s` stale, any still-open interval is retroactively capped at the heartbeat timestamp. Catches ungraceful suspend / crash / kill.
 - **Notification check** (60 s): evaluates break-overdue and per-category budget-exceeded conditions and pushes at most one notification per session / per category per day. See [Notifications](#notifications).
 - **D-Bus sleep listener**: subscribes to `org.freedesktop.login1.Manager.PrepareForSleep` on the system bus. On `(true)` (imminent suspend), closes the current open interval cleanly. Reconnects after 10 s on error.
-- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. On `idled` event, auto-pauses tracking with `reason = idle` and ends focus at the last input. On `resumed`, clears the pause of either reason, stamps `session_reset_at`, and reopens an interval for the current focus. See [Idle handling](#idle-handling). Retries every 5 s on Wayland connection loss, and re-subscribes the same way once `set-breaks` changes `min_break_secs`.
-- **Config watcher** (3 s mtime poll): on `~/.config/attn/config.toml` save, calls the same path as `attn reload`. Eliminates the manual reload step.
+- **Wayland idle-notify**: binds `ext_idle_notifier_v1`, creates a notification at `breaks.min_break_secs * 1000` ms. At notifier version 2 the notification is input-only, so idle inhibitors cannot hold it back. On `idled` event, auto-pauses tracking with `reason = idle` and ends focus at the last input. If a tracked video plays at that moment, the pause waits until the video ends. On `resumed`, clears the pause of either reason, stamps `session_reset_at`, and reopens an interval for the current focus. See [Idle handling](#idle-handling). Retries every 5 s on Wayland connection loss, and re-subscribes the same way once `set-breaks` changes `min_break_secs`.
+- **Config watcher** (3 s mtime poll): on `~/.config/attn/config.toml` save, calls the same path as `attn reload`. Eliminates the manual reload step. It compares the mtime of the file and of the path itself. A home-manager config is a symlink into the Nix store, where every file has mtime 1, so only the link's mtime changes on a switch.
 - **Signal handler**: on SIGINT/SIGTERM, closes the open app interval and any open media intervals cleanly and unlinks the socket, so totals on next start are correct. A second signal exits immediately.
 
 The daemon is resilient once running: missing browsers, unreadable History files, malformed individual visits, an absent session bus, a lost compositor event stream, or Wayland/D-Bus connection failures degrade specific features but never stop app tracking, and no subsystem error terminates the process. Only *startup* can be fatal — an unparseable or invalid config, a state DB that won't open, or a focus source that won't answer its first probe. In each of those cases the process exits non-zero and systemd (`Restart=on-failure`, `RestartSec=3`) retries.
@@ -198,9 +198,13 @@ Each adapter normalizes to a `FocusedWindow` struct with `app_id`, `title`, `pid
 If the focused window is a terminal emulator (matched against `apps.watch.terminal`), the daemon attempts to identify the active program running inside it. Four steps, in order:
 
 1. **Title match**. The compositor-reported window title is scanned for any program name configured under `[terminals.apps]`. Bounded-word matching is used so `clauderyx` does not match `claude`. A title containing a Claude Code spinner glyph resolves immediately. Titles beginning `tmux ` are skipped so the tmux query can answer instead. Modern terminals set the OSC 0/2 title to the foreground program's argv0; this path is fast and high-confidence, and its result is cached against the window id.
-2. **Per-window cache**. A 256-entry FIFO map from window id → last resolved program. It answers the ambiguous-title case (e.g. the title flipped to a file path) without a `/proc` walk. Session-scoped, never persisted.
-3. **Tmux query**. If a tmux client process is found in the focused window's descendant tree, `tmux list-clients` is invoked. The matching client's `pane_current_command` is checked against `[terminals.apps]`. Without tmux running, this path is skipped.
+2. **Per-window cache**. A 256-entry FIFO map from window id → last resolved program. It answers the ambiguous-title case (e.g. the title flipped to a file path). An entry holds only while that program still runs under the terminal's pid. When the program exits, the entry is dropped. Session-scoped, never persisted.
+3. **Tmux query**. If a tmux client process is found in the focused window's descendant tree, `tmux list-clients` is invoked. The matching client's `pane_current_command` is checked against `[terminals.apps]`. Without tmux running, this path is skipped. Each tmux call has a 1 s timeout.
 4. **Descendant scan**. Walk `/proc/<pid>/task/*/children` recursively from the focused window's pid, collecting basenames and start-times. The most recently started subprocess matching `[terminals.apps]` wins.
+
+One terminal process can serve several windows (Ghostty, kitty `--single-instance`). Its descendants then belong to all of its windows, so they cannot name the focused one. When the terminal pid has more than one child, steps 3 and 4 are skipped, except the tmux query for a title that starts with `tmux `. The tmux client with the most recent activity then wins.
+
+The resolver runs before the daemon takes the pause or DB lock, because steps 3 and 4 can run subprocesses.
 
 When any step matches, the `app_id` of the resulting interval is replaced with the resolved subprocess name (e.g. `claude`, `codex`, `nvim`). If none match, the original terminal `app_id` is kept.
 
@@ -208,8 +212,9 @@ When any step matches, the `app_id` of the resulting interval is replaced with t
 
 The compositor's idle signal decides. The interval cap is the fallback for when there is none.
 
-- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). `idled` fires `min_break_secs` after the last input. Tracking then auto-pauses (`paused_reason = idle`), and focus ends at the last input, not at the event: the open interval closes at `now - min_break_secs`, and any interval that ended later is trimmed back to that time. A screen locker that starts at the same timeout takes focus first and closes the interval late, so the trim matters. On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. Only a `manual` pause is restored from `meta` at startup. An idle pause is dropped at startup and again on each new subscription, because a fresh notification never emits `resumed` without its own `idled` first. If the user is still away, the next `idled` trims the time since.
-- **Interval cap** (`idle_after_secs`, default 300 s): applies only while no idle notification is live (compositor without `ext-idle-notify`, or the Wayland connection is down). The open interval then ends at most `idle_after_secs` after its start, both when it closes and in live totals. Closed rows keep their stored end. With a live notification the cap is off: 40 minutes of reading in one window is 40 minutes. Rows closed at less than their wall-clock duration are marked `idle_adjusted = 1` so reports can distinguish observed focus from capped focus. An idle inhibitor (a playing video, a game) holds `idled` back, so that time counts.
+- **Compositor idle** (Wayland `ext-idle-notify-v1`, `breaks.min_break_secs`): real input idle (no mouse/keyboard). At notifier version 2 the daemon uses `get_input_idle_notification`, which ignores idle inhibitors. The plain notification waits for every inhibitor: a video tab, a game, an SDL app, or a D-Bus `org.freedesktop.ScreenSaver.Inhibit` that an app never released. On one desktop, an inhibitor held it back for 6 days, and unattended nights counted as 10 h of focus. `attn doctor` warns on a compositor with version 1 only. `idled` fires `min_break_secs` after the last input. Tracking then auto-pauses (`paused_reason = idle`), and focus ends at the last input, not at the event: the open interval closes at `now - min_break_secs`, and any interval that ended later is trimmed back to that time. A screen locker that starts at the same timeout takes focus first and closes the interval late, so the trim matters. On `resumed`, the pause clears automatically and a fresh interval opens for the current focus. Only a `manual` pause is restored from `meta` at startup. An idle pause is dropped at startup and again on each new subscription, because a fresh notification never emits `resumed` without its own `idled` first. If the user is still away, the next `idled` trims the time since.
+- **Interval cap** (`idle_after_secs`, default 300 s): applies only while no idle notification is live (compositor without `ext-idle-notify`, or the Wayland connection is down). The open interval then ends at most `idle_after_secs` after its start, both when it closes and in live totals. Closed rows keep their stored end. With a live notification the cap is off: 40 minutes of reading in one window is 40 minutes. Rows closed at less than their wall-clock duration are marked `idle_adjusted = 1` so reports can distinguish observed focus from capped focus.
+- **Video without input**: a film needs no input, so the input-only `idled` alone would cut it at `min_break_secs`. If a media interval is open when `idled` fires, the daemon does not pause. It stores that interval's id. The media loop (2 s) checks the id. The pause starts when that interval closes, and focus ends at the interval's end. A media interval closes when playback stops or pauses, when the focus leaves the video, and when autoplay starts the next title. So, without input, only the video that plays at the last input counts. A single video counts for at most 3 h after the last input. `resumed` cancels the wait. The pause waits only for media that the daemon tracks: a focused browser on a `video` domain.
 
 ## Pause / break state machine
 
@@ -219,6 +224,7 @@ Tracking has exactly one pause state, held in memory as `Option<PauseInfo>` and 
 |---|---|---|
 | → paused (`manual`) | `break_start` socket command / `attn break-start` / popup button | close the open interval, persist pause |
 | → paused (`idle`) | Wayland `idled` | end focus at the last input, persist pause |
+| → paused (`idle`) | the media interval open at `idled` closes, or 3 h pass | end focus at that interval's end (at most the last input + 3 h), persist pause |
 | → running | `break_end` / `attn break-end` | clear pause, stamp `session_reset_at = now`, reopen an interval for current focus |
 | → running | Wayland `resumed`, either reason | same as above. `resumed` follows at least `min_break_secs` without input, so a manual "take a break" pause also ends once the user is back |
 | → running | new idle subscription, reason `idle` only | same as above |
@@ -239,13 +245,16 @@ Each browser is configured in `[browsers.<name>]` with `app_ids`, `history_paths
 Browser history is **never read live** from the user's profile. The pipeline is:
 
 1. Discover History DBs via glob expansion.
-2. Snapshot-copy the SQLite file (and `-wal` / `-shm` sidecars) to a temp path, chmod 0600.
+2. Snapshot-copy the SQLite file (and `-journal` / `-wal` / `-shm` sidecars) to `$XDG_RUNTIME_DIR`, chmod 0600. Chromium uses a rollback journal, so a copy taken during a commit needs the journal to roll back. The runtime dir is a tmpfs: a copy on each poll does not write to a disk.
 3. Query the snapshot.
 4. Convert the browser's native timestamps to UTC.
 5. Normalize visit ranges: sort by start, extend zero-length visits to the next visit's start (or the import window end), and clip any visit that overruns the next one. Bounds long-duration outliers from tab pinning.
 6. Delete the snapshot.
+7. Normalize again over the visits of all profiles of the browser. Without this step, one profile's last visit runs to the window end and takes the time of the other profile's later visits.
 
-This avoids any lock contention with the running browser. On daemon startup, any stale `attn-*` snapshot files in `$TMPDIR` owned by the current uid and older than 1 hour are cleaned up.
+This avoids any lock contention with the running browser. On daemon startup, any stale `attn-*` snapshot files in `$XDG_RUNTIME_DIR` (else `$TMPDIR`) owned by the current uid and older than 1 hour are cleaned up.
+
+The import runs every `poll_interval_secs` for today. After midnight, the first poll also imports the previous day once, because that day's last poll ran up to `poll_interval_secs` early.
 
 ### Domain clipping
 
@@ -256,9 +265,11 @@ Two refinements sit on top of the plain overlap:
 - **Video title override**: if the focused browser window's title identifies a known video domain (YouTube, Twitch, Netflix, …) and that domain is in a `video` watch category, the visit is re-attributed to the title's domain. History alone cannot tell a 2-hour video apart from a 2-second navigation away and back.
 - **Idle-cap exemption for video**: a focused interval covering a `video` domain is not clamped to `idle_after_secs`. Watching a film is genuinely low-input; capping it at 5 minutes would be wrong.
 
-For domain time that the browser reported but no focused interval covers, the daemon inserts an uncovered-segment row only when it overlaps a focused interval of *any* configured browser of the same name. (See `insert_uncovered_domain_segments` in `src/main.rs`.)
+Before the daemon inserts an overlap, it subtracts the domain rows already stored for the same `browser_app_id`. So two visits never claim the same focused second, and the first visit in start order keeps the time. (See `insert_uncovered_domain_segments` in `src/main.rs`.)
 
-On import, all imported rows for the day and profile are first deleted, then rewritten inside one `BEGIN IMMEDIATE` transaction. This keeps the table consistent even when browser history is amended or reordered between polls.
+On import, the imported rows for the day and profile are first deleted, then rewritten inside one `BEGIN IMMEDIATE` transaction. This keeps the table consistent even when browser history is amended or reordered between polls. The delete starts at the profile's earliest visit that is still in the history. A profile with no visits for the day keeps its rows. Thus a cleared or recreated history cannot erase time that the daemon already attributed.
+
+All overlap queries on the interval tables have a lower `started_at` bound one day before the window, so they use the `started_at` indexes. Without the bound, each visit scanned the whole ledger: on a 9-day ledger that was 16.8 s of each 60 s poll, under the DB lock. An interval longer than one day would drop out of these queries. The longest one seen so far is 12 h.
 
 ## Media (MPRIS) tracking
 
@@ -392,7 +403,7 @@ Nothing else in the daemon ever initiates an interaction.
 
 ## Daily totals & rebuild cooldown
 
-`daily_app_totals` and `daily_domain_totals` are derived from the interval tables. They are deleted and rebuilt on demand inside a single SQLite transaction, covering both today and yesterday so the cross-midnight slice of the still-open interval lands in yesterday's total.
+`daily_app_totals` and `daily_domain_totals` are derived from the interval tables. They are deleted and rebuilt on demand inside a single SQLite transaction, covering both today and yesterday so the cross-midnight slice of the still-open interval lands in yesterday's total. A day runs from local midnight to the next local midnight, so a day with a clock change lasts 23 or 25 hours.
 
 A 3-second cooldown gates the rebuild. After the first rebuild, subsequent `status` requests within 3 s reuse the cached totals; a request older than 3 s triggers a fresh rebuild. With the indicator polling every 5 s, this means at most one rebuild per poll. Steady-state status responses are ~1 ms.
 
