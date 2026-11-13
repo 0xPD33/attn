@@ -38,6 +38,9 @@
           };
 
           cargoLock.lockFile = ./Cargo.lock;
+          # nixpkgs' cargo hook makes libsqlite3-sys link the system sqlite.
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.sqlite ];
         };
       });
 
